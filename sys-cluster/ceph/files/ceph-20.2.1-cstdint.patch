@@ -1,0 +1,10 @@
+--- a/src/common/Formatter.h
++++ b/src/common/Formatter.h
+@@ -5,6 +5,7 @@
+ 
+ #include "include/buffer_fwd.h"
+ 
++#include <cstdint>
+ #include <deque>
+ #include <fstream>
+ #include <functional>
