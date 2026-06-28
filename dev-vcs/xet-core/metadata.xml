@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <longdescription>
+    xet-core is a Rust implementation of the Hugging Face Xet storage backend.
+    It provides chunk-based binary deduplication, concurrent upload/download to
+    Hugging Face Hub CAS servers, local disk caching, and Git LFS compatibility.
+    The git-xet CLI binary integrates with Git to transparently deduplicate large
+    files in repositories hosted on Hugging Face Hub.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">huggingface/xet-core</remote-id>
+  </upstream>
+</pkgmetadata>
