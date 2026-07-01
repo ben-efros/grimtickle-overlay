@@ -22,7 +22,7 @@ Recommended helper package:
 
 The recommended way to add this overlay is with eselect-repository.
 
-    eselect repository add grimtickle-overlay git https://github.com/benefros/grimtickle-overlay.git
+    eselect repository add grimtickle-overlay git https://github.com/ben-efros/grimtickle-overlay.git
 
 Then sync the overlay:
 
