@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    corosync 3.1.10 — the version required by pxvirt's pve-cluster.
+
+    Gentoo's sys-cluster/corosync-3.1.0 is missing:
+      - CVE-2026-35091 and CVE-2026-35092 (merged upstream in 3.1.10)
+      - knet ping timer fix on reload (merged upstream in 3.1.10)
+
+    This overlay ebuild tracks upstream 3.1.10 with two additional
+    service-file patches not yet submitted upstream:
+      - PrivateTmp=yes for systemd security sandboxing
+      - ConditionPathExists for corosync.conf (prevents spurious service
+        failure on nodes not yet joined to a cluster)
+
+    All ABI-affecting APIs (cmap, cpg, quorum, corotypes) are identical
+    to 3.1.0; pve-cluster links cleanly against this package.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">corosync/corosync</remote-id>
+  </upstream>
+</pkgmetadata>

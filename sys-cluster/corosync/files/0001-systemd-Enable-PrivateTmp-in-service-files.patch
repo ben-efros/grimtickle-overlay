@@ -1,0 +1,35 @@
+From: grimtickle-overlay <overlay@grimtickle.local>
+Date: Thu, 03 Jul 2026 07:00:00 +0000
+Subject: [PATCH 1/2] systemd: Enable PrivateTmp in service files
+
+Improves systemd security sandboxing by preventing corosync from
+accessing temporary files created by other services.
+
+Originally from Ferenc Wágner <wferi@debian.org> (Debian packaging).
+Adapted for corosync 3.1.10 (service files moved to init/systemd/).
+
+---
+ init/systemd/corosync-notifyd.service.in | 1 +
+ init/systemd/corosync.service.in         | 1 +
+ 2 files changed, 2 insertions(+)
+
+--- a/init/systemd/corosync-notifyd.service.in
++++ b/init/systemd/corosync-notifyd.service.in
+@@ -9,6 +9,7 @@
+ ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
+ Type=notify
+ Restart=on-failure
++PrivateTmp=yes
+ 
+ [Install]
+ WantedBy=multi-user.target
+--- a/init/systemd/corosync.service.in
++++ b/init/systemd/corosync.service.in
+@@ -31,6 +31,7 @@
+ #RestartSec=70
+ #  rewrite according to environment.
+ #ExecStartPre=/sbin/modprobe softdog
++PrivateTmp=yes
+ 
+ [Install]
+ WantedBy=multi-user.target

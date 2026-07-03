@@ -41,7 +41,7 @@ main tree** and do NOT need overlay ebuilds (unless pxvirt patches are required)
 |---------|-------------|-------|
 | libqb | `sys-cluster/libqb` ✅ | v2.0.8+ |
 | kronosnet | `sys-cluster/kronosnet` ✅ | v1.19+ |
-| corosync | `sys-cluster/corosync` ✅ | v3.1.0 — **must verify ABI with pve-cluster patches** |
+| corosync | `sys-cluster/corosync` ✅ | v3.1.0 — **ABI-compatible** (see corosync audit below); missing CVE-2026-35091/35092 patches |
 | frr | `net-misc/frr` ✅ | v10.x — for BGP/EVPN SDN |
 | swtpm | `app-crypt/swtpm` ✅ | v0.10.0 — vTPM support |
 | libtpms | `dev-libs/libtpms` ✅ | v0.10.x |
@@ -199,16 +199,35 @@ pve-http-server          pve-access-control
 |----------------|-------------|-------|
 | `kronosnet` | `sys-cluster/kronosnet` ✅ | **Already in Gentoo tree** (v1.19+) |
 | `libqb` | `sys-cluster/libqb` ✅ | **Already in Gentoo tree** (v2.0.8+) |
-| `corosync-pve` | `sys-cluster/corosync-pve` | Gentoo tree has upstream corosync-3.1.0; **must verify ABI compatibility with pve-cluster before deciding if overlay ebuild is needed** |
+| `corosync-pve` | `sys-cluster/corosync` ✅ | **Use upstream Gentoo tree package — no overlay ebuild needed** (see audit below) |
 | `pve-cluster` | `sys-cluster/pve-cluster` | pmxcfs cluster filesystem + Perl libs |
 | `pve-ha-manager` | `sys-cluster/pve-ha-manager` | HA resource management |
 
 ### Notes
 - `kronosnet` and `libqb` are confirmed in the Gentoo tree — no overlay ebuilds needed.
-- `corosync`: upstream `sys-cluster/corosync-3.1.0` is in tree. **Before writing a corosync-pve overlay ebuild, attempt to link pve-cluster against it.** If it succeeds, skip the overlay ebuild and use the tree package.
+- `corosync`: **Audit complete — ABI-compatible, no overlay ebuild needed.** See details below.
 - `pve-cluster` installs `pmxcfs` (a FUSE-based cluster filesystem using Corosync).
 - Cluster requires an odd number of nodes (or a QDevice) for quorum.
 - On a standalone node, see [single-node-bootstrap.md](single-node-bootstrap.md) to run pve-manager without pve-cluster.
+
+### Corosync Audit Result
+
+**pve-cluster links against:** `libcorosync_common`, `libcpg`, `libquorum`, `libcmap`
+(headers: `<corosync/cmap.h>`, `<corosync/cpg.h>`, `<corosync/quorum.h>`, `<corosync/corotypes.h>`)
+
+**pxvirt patches (5 total) on corosync 3.1.10:**
+
+| Patch | Files touched | ABI impact |
+|-------|--------------|-----------|
+| 0001 — Enable PrivateTmp in systemd service | `*.service.in` | None — service files only |
+| 0002 — Only start if conf exists | `corosync.service.in` | None — service files only |
+| 0003 — Fix knet ping timer calc on reload | `exec/cfg.c`, `exec/totemconfig.c`, `exec/totemconfig.h` | None — **exec/ internal headers only**, not public API |
+| 0004 — Return error if sanity check fails | `exec/totemsrp.c` | None — internal daemon code |
+| 0005 — Fix integer overflow in memb_join_sanity (CVE-2026-35091, CVE-2026-35092) | `exec/totemsrp.c` | None — internal daemon code |
+
+**Verdict:** ✅ `sys-cluster/corosync-3.1.0` from the Gentoo tree is **ABI-compatible** with pve-cluster. No overlay ebuild needed.
+
+**Security note:** Gentoo 3.1.0 is missing patches 0004 and 0005 (CVE-2026-35091 and CVE-2026-35092 — integer overflow in the cluster membership join sanity check). These are daemon-only vulnerabilities (not library ABI issues). Monitor Gentoo for a `corosync-3.1.10` ebuild or apply the patches manually until upstream updates.
 
 ---
 
@@ -269,7 +288,7 @@ pve-http-server          pve-access-control
 | pve-container | `app-emulation/pve-container` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
 | kronosnet | `sys-cluster/kronosnet` ✅ | 3 | — | ✅ | 🔲 | 🔲 |
 | libqb | `sys-cluster/libqb` ✅ | 3 | — | ✅ | 🔲 | 🔲 |
-| corosync-pve | `sys-cluster/corosync-pve` (or tree) | 3 | ❓ | ❓ | 🔲 | 🔲 |
+| corosync-pve | `sys-cluster/corosync` (tree) | 3 | ✅ ABI-compat | — | 🔲 | 🔲 |
 | pve-cluster | `sys-cluster/pve-cluster` | 3 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-ha-manager | `sys-cluster/pve-ha-manager` | 3 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-firewall | `net-firewall/pve-firewall` | 4 | 🔲 | 🔲 | 🔲 | 🔲 |

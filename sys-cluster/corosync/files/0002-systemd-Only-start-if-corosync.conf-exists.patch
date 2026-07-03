@@ -1,0 +1,30 @@
+From: grimtickle-overlay <overlay@grimtickle.local>
+Date: Thu, 03 Jul 2026 07:00:00 +0000
+Subject: [PATCH 2/2] systemd: Only start corosync if config file exists
+
+Adds ConditionPathExists=/etc/corosync/corosync.conf to the corosync
+service unit. Without this, systemd attempts to start corosync on boot
+even on nodes that have not yet been added to a cluster (no conf file),
+which causes a failed unit and noise in the journal.
+
+On a freshly installed pxvirt node, /etc/corosync/corosync.conf does
+not exist until 'pvecm create' or 'pvecm add' is run. This condition
+prevents the spurious failure.
+
+Originally from Fabian Grünbichler <f.gruenbichler@proxmox.com>.
+Adapted for corosync 3.1.10 (service files moved to init/systemd/).
+
+---
+ init/systemd/corosync.service.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/init/systemd/corosync.service.in
++++ b/init/systemd/corosync.service.in
+@@ -2,6 +2,7 @@
+ Description=Corosync Cluster Engine
+ Documentation=man:corosync man:corosync.conf man:corosync_overview
+ ConditionKernelCommandLine=!nocluster
++ConditionPathExists=/etc/corosync/corosync.conf
+ Requires=network-online.target
+ After=network-online.target
+
