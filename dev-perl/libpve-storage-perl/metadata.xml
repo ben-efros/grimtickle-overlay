@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="ceph">Enable Ceph RBD and CephFS storage backends (pulls sys-cluster/ceph, dev-perl/librados2-perl)</flag>
+    <flag name="nfs">Enable NFS storage backend (pulls net-fs/nfs-utils)</flag>
+    <flag name="samba">Enable CIFS/SMB storage backend (pulls net-fs/samba)</flag>
+    <flag name="iscsi">Enable iSCSI storage backends (pulls sys-block/open-iscsi)</flag>
+    <flag name="esxi">Enable VMware ESXi import storage plugin</flag>
+  </use>
+  <longdescription>
+    Proxmox VE storage management library. Provides the unified storage
+    abstraction layer (PVE::Storage) with plugins for all supported backends:
+    Directory, LVM, LVM-thin, NFS, CIFS/SMB, iSCSI, RBD (Ceph), CephFS,
+    ZFS, ZFS-on-root, BTRFS, Proxmox Backup Server (PBS), and ESXi import.
+
+    All plugin .pm files are always installed (PVE::Storage hard-uses all
+    plugins at startup). USE flags control only the system-level tools
+    needed to actually use each backend.
+
+    Note: libpve-cluster-perl (not yet ported) is required to read
+    /etc/pve/storage.cfg. Single-node workaround: seed the file manually.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">jiangcuo/pve-storage</remote-id>
+  </upstream>
+</pkgmetadata>

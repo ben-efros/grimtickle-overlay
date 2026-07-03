@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Proxmox VE API client library implementing HTTP/HTTPS REST calls to
+    PVE and PBS API endpoints. Provides PVE::APIClient::LWP (the main
+    client class) and PVE::APIClient::Exception. Used by
+    PVE::Storage::PBSPlugin to communicate with Proxmox Backup Server.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-apiclient.git</remote-id>
+  </upstream>
+</pkgmetadata>

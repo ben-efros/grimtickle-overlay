@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Perl XS binding for the POSIX strptime(3) function (parse time strings).
+    Required by PVE::Storage::PBSPlugin to parse Proxmox Backup Server
+    snapshot timestamps. Without this module, PVE::Storage fails to load.
+  </longdescription>
+  <upstream>
+    <remote-id type="cpan">POSIX-strptime</remote-id>
+    <remote-id type="cpan-module">POSIX::strptime</remote-id>
+  </upstream>
+</pkgmetadata>
