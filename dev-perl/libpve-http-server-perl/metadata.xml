@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    AnyEvent-based async HTTP/WebSocket server library used by all
+    Proxmox VE Perl daemons (pveproxy, pvedaemon, spiceproxy).
+    Provides PVE::APIServer::AnyEvent (the main server), formatters
+    (JSON, HTML, Bootstrap) and WebSocket upgrade support.
+  </longdescription>
+  <use>
+    <flag name="html-browser">Install www-apps/bootstrap for the built-in
+      HTML API browser formatter (development tool; not needed for normal
+      pxvirt operation)</flag>
+  </use>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-http-server.git</remote-id>
+  </upstream>
+</pkgmetadata>

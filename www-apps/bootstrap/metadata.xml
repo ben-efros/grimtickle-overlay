@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Bootstrap 5 pre-built CSS/JS dist files, installed to
+    /usr/share/bootstrap-html/ for use by pve-http-server's built-in
+    HTML API browser formatter (Formatter::Bootstrap).
+  </longdescription>
+  <upstream>
+    <remote-id type="github">twbs/bootstrap</remote-id>
+  </upstream>
+</pkgmetadata>
