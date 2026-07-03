@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    ExtJS 7.0 cross-browser JavaScript framework, Proxmox/pxvirt edition.
+    Ships only the pre-compiled build/ output (classic theme, locale files,
+    charts extension). Used by the pxvirt web UI via proxmox-widget-toolkit.
+    This is the GPL-licensed open source edition of Ext JS 7.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">extjs/ext-js</remote-id>
+  </upstream>
+</pkgmetadata>

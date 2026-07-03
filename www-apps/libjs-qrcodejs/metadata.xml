@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="minify">Minify qrcode.js using uglify-js. Without this flag, the
+      unminified source is installed as qrcode.min.js (functionally identical,
+      slightly larger file). Enable for production deployments.</flag>
+  </use>
+  <longdescription>
+    Cross-browser QR code generator supporting HTML5 Canvas and table tags.
+    Required by pve-manager: pveproxy serves /qrcode.min.js from
+    /usr/share/javascript/qrcodejs/qrcode.min.js for TOTP enrollment in the
+    pxvirt web UI.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">davidshimjs/qrcodejs</remote-id>
+  </upstream>
+</pkgmetadata>

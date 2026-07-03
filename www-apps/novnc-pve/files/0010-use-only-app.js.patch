@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dominik Csapak <d.csapak@proxmox.com>
+Date: Tue, 16 May 2017 10:36:15 +0200
+Subject: [PATCH] use only app.js
+
+Since we bundle the code into a single ES Module, use that only.
+Also remove the default/mandatory settings loading code, as we do
+that ourselves directly in the code.
+
+Signed-off-by: Dominik Csapak <d.csapak@proxmox.com>
+---
+ vnc.html | 49 ++-----------------------------------------------
+ 1 file changed, 2 insertions(+), 47 deletions(-)
+
+diff --git a/vnc.html b/vnc.html
+index 3c40c49..8ff6739 100644
+--- a/vnc.html
++++ b/vnc.html
+@@ -40,53 +40,8 @@
+ 	INCLUDE_URI='/novnc/include';
+     </script>
+     <script type="module">
+-        import UI from "/novnc/app/ui.js";
+-        import * as Log from '/novnc/core/util/logging.js';
+-
+-        let response;
+-
+-        let defaults = {};
+-        let mandatory = {};
+-
+-        // Default settings will be loaded from defaults.json. Mandatory
+-        // settings will be loaded from mandatory.json, which the user
+-        // cannot change.
+-
+-        try {
+-            response = await fetch('/novnc/defaults.json');
+-            if (!response.ok) {
+-                throw Error("" + response.status + " " + response.statusText);
+-            }
+-
+-            defaults = await response.json();
+-        } catch (err) {
+-            Log.Error("Couldn't fetch defaults.json: " + err);
+-        }
+-
+-        try {
+-            response = await fetch('/novnc/mandatory.json');
+-            if (!response.ok) {
+-                throw Error("" + response.status + " " + response.statusText);
+-            }
+-
+-            mandatory = await response.json();
+-        } catch (err) {
+-            Log.Error("Couldn't fetch mandatory.json: " + err);
+-        }
+-
+-        // You can also override any defaults you need here:
+-        //
+-        // defaults['host'] = 'vnc.example.com';
+-
+-        // Or force a specific setting, preventing the user from
+-        // changing it:
+-        //
+-        // mandatory['view_only'] = true;
+-
+-        // See docs/EMBEDDING.md for a list of possible settings.
+-
+-        UI.start({ settings: { defaults: defaults,
+-                               mandatory: mandatory } });
++        import UI from "/novnc/app.js";
++        UI.start({ settings: { defaults: {}, mandatory: {} } });
+     </script>
+ </head>
+ 
+-- 
+2.39.5
+

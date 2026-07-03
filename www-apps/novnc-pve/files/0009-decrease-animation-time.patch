@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Dominik Csapak <d.csapak@proxmox.com>
+Date: Fri, 20 Jan 2017 10:55:49 +0100
+Subject: [PATCH] decrease animation time
+
+because 0.5s is too long
+
+Signed-off-by: Dominik Csapak <d.csapak@proxmox.com>
+---
+ app/styles/base.css | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/app/styles/base.css b/app/styles/base.css
+index 87bfb45..6e9b25d 100644
+--- a/app/styles/base.css
++++ b/app/styles/base.css
+@@ -223,7 +223,7 @@ html {
+     position: fixed;
+     z-index: 10;
+ 
+-    transition: 0.5s ease-in-out;
++    transition: 0.1s ease-in-out;
+ 
+     /* Edge misrenders animations wihthout this */
+     transform: translateX(0);
+@@ -240,7 +240,7 @@ html {
+     position: relative;
+     left: -100%;
+ 
+-    transition: 0.5s ease-in-out;
++    transition: 0.1s ease-in-out;
+ 
+     background-color: var(--novnc-blue);
+     border-radius: 0 12px 12px 0;
+@@ -261,7 +261,7 @@ html {
+     height: 100%;
+     width: 30px;
+     left: -30px;
+-    transition: box-shadow 0.5s ease-in-out;
++    transition: box-shadow 0.1s ease-in-out;
+ }
+ #noVNC_control_bar.noVNC_open::before {
+     box-shadow: 6px 6px 0px rgba(0, 0, 0, 0.5);
+@@ -295,7 +295,7 @@ html {
+ }
+ #noVNC_control_bar_handle:after {
+     content: "";
+-    transition: transform 0.5s ease-in-out;
++    transition: transform 0.1s ease-in-out;
+     background: url("../images/handle.svg");
+     position: absolute;
+     top: 22px; /* (50px-6px)/2 */
+@@ -407,7 +407,7 @@ html {
+ .noVNC_panel {
+     transform: translateX(25px);
+ 
+-    transition: 0.5s ease-in-out;
++    transition: 0.25s ease-in-out;
+ 
+     box-sizing: border-box; /* so max-width don't have to care about padding */
+     max-width: calc(100vw - 75px - 25px); /* minus left and right margins */
+@@ -658,7 +658,7 @@ html {
+ 
+     cursor: pointer;
+ 
+-    transition: 0.5s ease-in-out;
++    transition: 0.1s ease-in-out;
+ 
+     visibility: hidden;
+     opacity: 0;
+@@ -817,7 +817,7 @@ html {
+ 
+ /* Transition screen */
+ #noVNC_transition {
+-    transition: 0.5s ease-in-out;
++    transition: 0.1s ease-in-out;
+ 
+     display: flex;
+     opacity: 0;
+-- 
+2.39.5
+

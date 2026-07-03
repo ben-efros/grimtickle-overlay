@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Samuel Mannehed <samuel@cendio.se>
+Date: Mon, 24 Mar 2025 22:14:43 +0100
+Subject: [PATCH] Fix appearance of extra key buttons
+
+Since the extra keys panel is quite narrow in width, a max-width style
+resulted in the buttons almost disappearing. That rule was only intended
+for elements inside the settings panel.
+
+Broken by commit 14f9ea5880f32f2a4867006d46c8e871942c698e.
+
+Another minor error that is also fixed by this commit is that the
+clipboard textarea no longer incorrectly gets a left margin of 6px.
+
+Fixes #1946.
+
+Signed-off-by: Dominik Csapak <d.csapak@proxmox.com>
+---
+ app/styles/base.css | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/app/styles/base.css b/app/styles/base.css
+index 6e9b25d..0c7c544 100644
+--- a/app/styles/base.css
++++ b/app/styles/base.css
+@@ -475,15 +475,6 @@ html {
+     margin: 5px;
+ }
+ 
+-.noVNC_panel button,
+-.noVNC_panel select,
+-.noVNC_panel textarea,
+-.noVNC_panel input:not([type=checkbox]):not([type=radio]) {
+-    margin-left: 6px;
+-    /* Prevent inputs in panels from being too wide */
+-    max-width: calc(100% - 6px - var(--input-xpadding) * 2);
+-}
+-
+ .noVNC_panel .noVNC_heading {
+     background-color: var(--novnc-blue);
+     border-radius: 6px;
+@@ -621,6 +612,15 @@ html {
+     list-style: none;
+     padding: 0px;
+ }
++#noVNC_settings button,
++#noVNC_settings select,
++#noVNC_settings textarea,
++#noVNC_settings input:not([type=checkbox]):not([type=radio]) {
++    margin-left: 6px;
++    /* Prevent inputs in panels from being too wide */
++    max-width: calc(100% - 6px - var(--input-xpadding) * 2);
++}
++
+ #noVNC_setting_port {
+     width: 80px;
+ }
+-- 
+2.39.5
+

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    noVNC 1.6.0 with 20 Proxmox/pxvirt-specific patches. Provides the HTML5
+    VNC console used by pveproxy when a user opens the Console tab for a VM or
+    container in the pxvirt web UI.
+
+    Do NOT replace with app-misc/novnc from the Gentoo tree. The Proxmox
+    patches add PVE-specific UI code, WebSocket auth handling, custom
+    fbresize events, command passthrough, clipboard integration, and other
+    features that are required for correct pxvirt console operation.
+
+    Build produces a single ESM bundle (app.js) via esbuild from app/ui.js.
+    The index.html.tpl template is served by pveproxy with per-VM substitutions.
+
+    pveproxy serves this package's files from /usr/share/novnc-pve/.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">novnc/noVNC</remote-id>
+  </upstream>
+</pkgmetadata>
