@@ -1,0 +1,72 @@
+# /etc/network/interfaces — Proxmox VE network configuration
+#
+# ════════════════════════════════════════════════════════════════════════════════
+# GENTOO PORT NOTICE
+# ════════════════════════════════════════════════════════════════════════════════
+#
+# This file IS used by Proxmox VE on Gentoo, but NOT directly by the OS.
+#
+# Role of this file:
+#   • PVE reads it to display the current network config in the web UI
+#   • PVE writes it when you save network changes via the web UI or API
+#   • PVE's SDN system appends overlay config to /etc/network/interfaces.d/sdn
+#     (sourced below) when SDN zones are configured
+#
+# On Debian/Proxmox: ifupdown2 reads this file and applies it to the kernel.
+#
+# On Gentoo (this port): /usr/sbin/pve-ifreload (from net-misc/pve-network-backend)
+#   reads this file and translates it to your active network backend:
+#
+#   systemd-networkd: writes /run/systemd/network/10-*.{network,netdev}
+#                     then runs: networkctl reload
+#
+#   NetworkManager:   calls nmcli to create/update connections
+#
+#   netifrc:          writes /etc/conf.d/net.pve (source it from /etc/conf.d/net)
+#                     then restarts net.<iface> init scripts
+#
+# INITIAL SETUP (Gentoo):
+#   The first bridge (vmbr0) must be created BEFORE pvedaemon starts.
+#   This file will NOT auto-apply on boot unless you configure your network
+#   backend to manage vmbr0 separately. See:
+#     docs/networking/gentoo-networking.md in grimtickle-overlay
+#
+# APPLYING CHANGES:
+#   Via web UI: Network → Apply Configuration button calls PUT /nodes/{n}/network
+#               which runs /usr/sbin/pve-ifreload (replaces ifreload -a)
+#   Manually:   /usr/sbin/pve-ifreload
+#
+# SUPPORTED INTERFACE TYPES (Gentoo port):
+#   ✓ Linux bridge (bridge-ports, bridge-stp, bridge-fd)
+#   ✓ Static IP (address, gateway)
+#   ✓ DHCP
+#   ✓ Manual (no address — bond/bridge members)
+#   ✓ VxLAN / EVPN overlays via SDN (generated into interfaces.d/sdn)
+#   ✗ OVS (Open vSwitch) bridges — requires openvswitch running
+#   ✗ ifupdown2-specific options (allow-*, pre-up/post-up hooks)
+#
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Include SDN overlay configuration (written by PVE when SDN zones are active)
+# If you are not using SDN, this source line is harmless.
+source /etc/network/interfaces.d/*
+
+# Loopback (always present — do not remove)
+auto lo
+iface lo inet loopback
+
+# ── Primary VM bridge ──────────────────────────────────────────────────────────
+# Edit this to match your physical interface name and IP address.
+# PVE requires at least one bridge for VM and container networking.
+# On Gentoo, changes here take effect when you click "Apply Configuration"
+# in the web UI, or run: /usr/sbin/pve-ifreload
+#
+auto vmbr0
+iface vmbr0 inet static
+	address 192.168.1.1/24
+	gateway 192.168.1.254
+	bridge-ports eth0
+	bridge-stp off
+	bridge-fd 0
+#	# Uncomment for jumbo frames:
+#	mtu 9000

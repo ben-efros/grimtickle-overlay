@@ -1,0 +1,71 @@
+--- a/PVE/API2/Network.pm
++++ b/PVE/API2/Network.pm
+@@ -858,21 +858,22 @@ __PACKAGE__->register_method({
+     },
+ });
+ 
+-sub ifupdown2_version {
++# ── Gentoo port: pve-ifreload replaces ifupdown2's ifreload -a ─────────────────
++# On Debian/Proxmox, ifupdown2 applies /etc/network/interfaces directly.
++# On Gentoo, /usr/sbin/pve-ifreload (from net-misc/pve-network-backend) reads
++# /etc/network/interfaces and translates it to the active network backend
++# (systemd-networkd, NetworkManager, or netifrc). See docs/networking/.
++
++sub pve_ifreload_available {
+     my $v;
+-    PVE::Tools::run_command(['ifreload', '-V'], outfunc => sub { $v //= shift });
+-    return if !defined($v) || $v !~ /^\s*ifupdown2:(\S+)\s*$/;
+-    $v = $1;
+-    my ($major, $minor, $extra, $pve) = split(/\.|-/, $v);
+-    my $is_pve = defined($pve) && $pve =~ /(pve|pmx|proxmox)/;
+-
+-    return ($major * 100000 + $minor * 1000 + $extra * 10, $is_pve, $v);
++    return -x '/usr/sbin/pve-ifreload';
+ }
+ 
+-sub assert_ifupdown2_installed {
+-    die "you need ifupdown2 to reload network configuration\n" if !-e '/usr/share/ifupdown2';
+-    my ($v, $pve, $v_str) = ifupdown2_version();
+-    die
+-        "incompatible 'ifupdown2' package version '$v_str'! Did you install from Proxmox repositories?\n"
+-        if $v < (1 * 100000 + 2 * 1000 + 8 * 10) || !$pve;
++sub assert_network_reload_available {
++    if (-x '/usr/sbin/pve-ifreload') {
++        return;  # Gentoo: pve-network-backend provides the reload tool
++    }
++    if (-e '/usr/share/ifupdown2') {
++        return;  # Debian/upstream: ifupdown2 is present
++    }
++    die "no network reload tool found: install net-misc/pve-network-backend "
++        . "(Gentoo) or ifupdown2 (Debian)\n";
+ }
+ 
+ __PACKAGE__->register_method({
+@@ -913,15 +914,22 @@ __PACKAGE__->register_method({
+ 
+         assert_ifupdown2_installed();
++        assert_network_reload_available();
+ 
+         my $worker = sub {
+ 
+             rename($new_config_file, $current_config_file) if -e $new_config_file;
+ 
+             if ($have_sdn) {
+                 PVE::Network::SDN::generate_etc_network_config();
+                 PVE::Network::SDN::generate_dhcp_config();
+             }
+ 
+             my $err = sub {
+                 my $line = shift;
+                 if ($line =~ /(warning|error): (\S+):/) {
+                     print "$2 : $line \n";
+                 }
+             };
+-            PVE::Tools::run_command(['ifreload', '-a'], errfunc => $err);
++            # Gentoo: use pve-ifreload if available, fall back to ifupdown2's ifreload
++            my $reload_cmd = -x '/usr/sbin/pve-ifreload'
++                ? ['/usr/sbin/pve-ifreload']
++                : ['ifreload', '-a'];
++            PVE::Tools::run_command($reload_cmd, errfunc => $err);
+ 
+             if (defined($regenerate_frr)) {

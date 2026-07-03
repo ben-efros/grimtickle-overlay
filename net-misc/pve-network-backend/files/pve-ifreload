@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# pve-ifreload — Gentoo network backend for Proxmox VE
+#
+# Drop-in replacement for ifupdown2's "ifreload -a" command.
+# Called by:
+#   - PVE::API2::Network::reload_network_config  (pvedaemon PUT /nodes/{n}/network)
+#   - pve-sdn-commit script (after SDN config changes)
+#
+# Reads /etc/network/interfaces (the PVE source-of-truth, Debian ifupdown format)
+# and applies the configuration using the active Gentoo network backend.
+#
+# BACKENDS (detected automatically, or forced via PVENET_BACKEND env var):
+#   networkd  — systemd-networkd (.network + .netdev files in /run/systemd/network/)
+#   nm        — NetworkManager (nmcli keyfile)
+#   netifrc   — Gentoo netifrc (/etc/conf.d/net + rc-service net.*)
+#
+# /etc/network/interfaces FORMAT (subset supported):
+#   auto <iface>
+#   iface <iface> inet static
+#       address <CIDR>
+#       gateway <IP>
+#       bridge-ports <port>  bridge-stp off  bridge-fd 0
+#   iface <iface> inet manual   (no address — bridge/bond members)
+#   iface <iface> inet dhcp
+#   source /etc/network/interfaces.d/*  (included, e.g. SDN overlay)
+#
+# UNSUPPORTED (Gentoo-specific limitations):
+#   OVS (Open vSwitch) bridge type — requires openvswitch running
+#   bond-mode 802.3ad (LACP) on netifrc backend — use networkd for LACP
+#   Custom ifupdown2 pre-up/post-up hooks
+#
+# See: docs/networking/gentoo-networking.md in grimtickle-overlay
+
+set -euo pipefail
+
+INTERFACES_FILE="${PVENET_INTERFACES:-/etc/network/interfaces}"
+BACKEND="${PVENET_BACKEND:-}"
+LOG_TAG="pve-ifreload"
+
+log()  { logger -t "$LOG_TAG" "$*"; echo "$*" >&2; }
+warn() { logger -t "$LOG_TAG" -p user.warning "WARNING: $*"; echo "WARNING: $*" >&2; }
+die()  { logger -t "$LOG_TAG" -p user.err "ERROR: $*"; echo "ERROR: $*" >&2; exit 1; }
+
+# ── Backend detection ──────────────────────────────────────────────────────────
+detect_backend() {
+    if [[ -n "$BACKEND" ]]; then
+        echo "$BACKEND"
+        return
+    fi
+    if systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+        echo "networkd"
+    elif systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        echo "nm"
+    elif [[ -f /etc/init.d/net.lo ]]; then
+        echo "netifrc"
+    else
+        die "Cannot detect active network backend. Set PVENET_BACKEND=networkd|nm|netifrc"
+    fi
+}
+
+# ── Parse /etc/network/interfaces (and sourced fragments) ─────────────────────
+# Outputs: associative array IFACES[name]=type:family:address:gateway:ports:stp:fd:mtu
+# Simplified parser — handles the subset PVE generates.
+declare -A IFACE_TYPE IFACE_FAMILY IFACE_ADDR IFACE_GW IFACE_PORTS IFACE_STP IFACE_FD IFACE_MTU IFACE_AUTO
+
+parse_interfaces() {
+    local file="$1"
+    local cur_iface="" family=""
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"   # strip comments
+        [[ -z "${line// }" ]] && continue
+
+        if [[ "$line" =~ ^source[[:space:]]+(.*) ]]; then
+            local glob="${BASH_REMATCH[1]}"
+            # shellcheck disable=SC2086
+            for f in $glob; do
+                [[ -f "$f" ]] && parse_interfaces "$f"
+            done
+            continue
+        fi
+
+        if [[ "$line" =~ ^auto[[:space:]]+(.*) ]]; then
+            for iface in ${BASH_REMATCH[1]}; do
+                IFACE_AUTO[$iface]=1
+            done
+            cur_iface=""
+            continue
+        fi
+
+        if [[ "$line" =~ ^iface[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+) ]]; then
+            cur_iface="${BASH_REMATCH[1]}"
+            family="${BASH_REMATCH[2]}"   # inet / inet6
+            local method="${BASH_REMATCH[3]}"  # static / dhcp / manual
+            IFACE_FAMILY[$cur_iface]="$family"
+            IFACE_TYPE[$cur_iface]="${method}"
+            continue
+        fi
+
+        [[ -z "$cur_iface" ]] && continue
+
+        if [[ "$line" =~ ^[[:space:]]+address[[:space:]]+(.+) ]];      then IFACE_ADDR[$cur_iface]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ ^[[:space:]]+gateway[[:space:]]+(.+) ]];      then IFACE_GW[$cur_iface]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ ^[[:space:]]+bridge-ports[[:space:]]+(.+) ]]; then IFACE_PORTS[$cur_iface]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ ^[[:space:]]+bridge-stp[[:space:]]+(.+) ]];   then IFACE_STP[$cur_iface]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ ^[[:space:]]+bridge-fd[[:space:]]+(.+) ]];    then IFACE_FD[$cur_iface]="${BASH_REMATCH[1]}"; fi
+        if [[ "$line" =~ ^[[:space:]]+mtu[[:space:]]+(.+) ]];          then IFACE_MTU[$cur_iface]="${BASH_REMATCH[1]}"; fi
+
+    done < "$file"
+}
+
+# ── systemd-networkd backend ───────────────────────────────────────────────────
+apply_networkd() {
+    local run_dir="/run/systemd/network"
+    local changed=0
+
+    for iface in "${!IFACE_TYPE[@]}"; do
+        local family="${IFACE_FAMILY[$iface]:-inet}"
+        local method="${IFACE_TYPE[$iface]}"
+        local addr="${IFACE_ADDR[$iface]:-}"
+        local gw="${IFACE_GW[$iface]:-}"
+        local ports="${IFACE_PORTS[$iface]:-}"
+        local stp="${IFACE_STP[$iface]:-off}"
+        local fd="${IFACE_FD[$iface]:-0}"
+        local mtu="${IFACE_MTU[$iface]:-}"
+
+        # Bridge .netdev
+        if [[ -n "$ports" ]]; then
+            local netdev_file="${run_dir}/10-${iface}.netdev"
+            local stp_bool="no"; [[ "$stp" == "on" || "$stp" == "yes" || "$stp" == "1" ]] && stp_bool="yes"
+
+            cat > "${netdev_file}.tmp" << EOF
+# Generated by pve-ifreload from /etc/network/interfaces
+# DO NOT EDIT — managed by Proxmox VE
+[NetDev]
+Name=${iface}
+Kind=bridge
+
+[Bridge]
+STP=${stp_bool}
+ForwardDelaySec=${fd}
+EOF
+            mv "${netdev_file}.tmp" "${netdev_file}"
+
+            # Each bridge port needs a .network pointing to master
+            for port in $ports; do
+                [[ "$port" == "none" ]] && continue
+                local port_file="${run_dir}/10-${port}-brport.network"
+                cat > "${port_file}.tmp" << EOF
+# Generated by pve-ifreload
+[Match]
+Name=${port}
+[Network]
+Bridge=${iface}
+EOF
+                mv "${port_file}.tmp" "${port_file}"
+                changed=1
+            done
+        fi
+
+        # Bridge/interface .network
+        local net_file="${run_dir}/10-${iface}.network"
+        {
+            echo "# Generated by pve-ifreload from /etc/network/interfaces"
+            echo "# DO NOT EDIT — managed by Proxmox VE"
+            echo "[Match]"
+            echo "Name=${iface}"
+            echo ""
+            echo "[Network]"
+            if [[ "$method" == "dhcp" ]]; then
+                if [[ "$family" == "inet6" ]]; then echo "DHCP=ipv6"
+                else echo "DHCP=ipv4"; fi
+            elif [[ "$method" == "static" && -n "$addr" ]]; then
+                echo "Address=${addr}"
+                [[ -n "$gw" ]] && echo "Gateway=${gw}"
+            fi
+            [[ -n "$mtu" ]] && echo "MTUBytes=${mtu}"
+        } > "${net_file}.tmp"
+        mv "${net_file}.tmp" "${net_file}"
+        changed=1
+    done
+
+    if [[ "$changed" -eq 1 ]]; then
+        log "Applying network config via systemd-networkd"
+        networkctl reload
+        sleep 1
+        # Bring up any auto interfaces that aren't yet up
+        for iface in "${!IFACE_AUTO[@]}"; do
+            networkctl up "$iface" 2>/dev/null || true
+        done
+    fi
+}
+
+# ── NetworkManager backend ─────────────────────────────────────────────────────
+apply_nm() {
+    log "Applying network config via NetworkManager"
+    for iface in "${!IFACE_TYPE[@]}"; do
+        local method="${IFACE_TYPE[$iface]}"
+        local addr="${IFACE_ADDR[$iface]:-}"
+        local gw="${IFACE_GW[$iface]:-}"
+        local ports="${IFACE_PORTS[$iface]:-}"
+        local conn_name="pve-${iface}"
+
+        # Delete existing managed connection if any
+        nmcli connection delete "$conn_name" 2>/dev/null || true
+
+        if [[ -n "$ports" ]]; then
+            # Create bridge
+            nmcli connection add type bridge ifname "$iface" con-name "$conn_name" \
+                stp no \
+                bridge.forward-delay 0 2>/dev/null
+            for port in $ports; do
+                [[ "$port" == "none" ]] && continue
+                nmcli connection add type bridge-slave ifname "$port" \
+                    master "$iface" con-name "pve-${port}-slave" 2>/dev/null || true
+            done
+        fi
+
+        if [[ "$method" == "dhcp" ]]; then
+            nmcli connection modify "$conn_name" ipv4.method auto 2>/dev/null || true
+        elif [[ "$method" == "static" && -n "$addr" ]]; then
+            nmcli connection modify "$conn_name" \
+                ipv4.method manual \
+                ipv4.addresses "$addr" \
+                ${gw:+ipv4.gateway "$gw"} 2>/dev/null || true
+        fi
+
+        if [[ -v "IFACE_AUTO[$iface]" ]]; then
+            nmcli connection up "$conn_name" 2>/dev/null || true
+        fi
+    done
+}
+
+# ── netifrc backend ────────────────────────────────────────────────────────────
+apply_netifrc() {
+    local conf="/etc/conf.d/net"
+    log "Applying network config via netifrc"
+
+    # We write to a PVE-managed fragment; main /etc/conf.d/net should source it
+    local pve_conf="/etc/conf.d/net.pve"
+    {
+        echo "# Generated by pve-ifreload from /etc/network/interfaces"
+        echo "# DO NOT EDIT — managed by Proxmox VE"
+        echo "# Source this from /etc/conf.d/net: source /etc/conf.d/net.pve"
+        echo ""
+        for iface in "${!IFACE_TYPE[@]}"; do
+            local method="${IFACE_TYPE[$iface]}"
+            local addr="${IFACE_ADDR[$iface]:-}"
+            local gw="${IFACE_GW[$iface]:-}"
+            local ports="${IFACE_PORTS[$iface]:-}"
+            local stp="${IFACE_STP[$iface]:-off}"
+
+            if [[ -n "$ports" ]]; then
+                local portlist="${ports// /\" \"}"
+                echo "bridge_${iface}=\"${portlist}\""
+                local stp_val=0; [[ "$stp" == "on" || "$stp" == "yes" || "$stp" == "1" ]] && stp_val=1
+                echo "bridge_forward_delay_${iface}=0"
+                echo "brctl_${iface}=\"setstp ${iface} ${stp_val}\""
+            fi
+            if [[ "$method" == "dhcp" ]]; then
+                echo "config_${iface}=\"dhcp\""
+            elif [[ "$method" == "static" && -n "$addr" ]]; then
+                echo "config_${iface}=\"${addr}\""
+                [[ -n "$gw" ]] && echo "routes_${iface}=\"default via ${gw}\""
+            elif [[ "$method" == "manual" ]]; then
+                echo "config_${iface}=\"null\""
+            fi
+            echo ""
+        done
+    } > "${pve_conf}.tmp"
+    mv "${pve_conf}.tmp" "$pve_conf"
+
+    # Restart affected interfaces
+    for iface in "${!IFACE_AUTO[@]}"; do
+        if [[ -e "/etc/init.d/net.${iface}" ]]; then
+            rc-service "net.${iface}" restart 2>/dev/null || \
+                warn "Failed to restart net.${iface}"
+        else
+            warn "net.${iface} init script not found — create symlink: ln -s net.lo /etc/init.d/net.${iface}"
+        fi
+    done
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+[[ ! -f "$INTERFACES_FILE" ]] && die "$INTERFACES_FILE not found"
+
+parse_interfaces "$INTERFACES_FILE"
+
+BACKEND="$(detect_backend)"
+log "Using backend: $BACKEND"
+
+case "$BACKEND" in
+    networkd) apply_networkd ;;
+    nm)       apply_nm ;;
+    netifrc)  apply_netifrc ;;
+    *)        die "Unknown backend: $BACKEND. Use networkd, nm, or netifrc" ;;
+esac
+
+log "Network reload complete"

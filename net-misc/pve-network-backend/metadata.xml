@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="networkd">Use systemd-networkd as the network apply backend (recommended for systemd systems)</flag>
+    <flag name="nm">Use NetworkManager as the network apply backend</flag>
+    <flag name="netifrc">Use Gentoo netifrc (/etc/conf.d/net) as the network apply backend</flag>
+  </use>
+  <longdescription>
+    Gentoo network backend adapter for Proxmox VE.
+
+    Provides /usr/sbin/pve-ifreload — a drop-in replacement for ifupdown2's
+    "ifreload -a" which Proxmox uses to apply network configuration changes.
+
+    On Gentoo, /etc/network/interfaces is maintained by PVE as its source of
+    truth for network configuration (read/displayed in the web UI, written when
+    you save changes). pve-ifreload translates this file to your active Gentoo
+    network backend: systemd-networkd (.network/.netdev files), NetworkManager
+    (nmcli), or netifrc (/etc/conf.d/net.pve).
+
+    Also carries the pve-manager patch that makes ifreload calls conditional on
+    the available tool (pve-ifreload on Gentoo, ifreload on Debian).
+  </longdescription>
+</pkgmetadata>

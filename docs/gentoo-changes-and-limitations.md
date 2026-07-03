@@ -488,3 +488,41 @@ HA auto-rebalance, dynamic CRS mode) were already merged into upstream 9.1.6. On
 With systemd-networkd, drop a `.network` + `.netdev` file and `networkctl reload`.
 With netifrc, set `bridge_vmbr0` in `/etc/conf.d/net` and start `net.vmbr0`.
 Full automation comes with `net-misc/pve-network-backend`.
+
+---
+
+## net-misc/pve-network-backend (1.0.0) — ifreload replacement + /etc/network/interfaces
+
+**This is a new Gentoo-only package** — no equivalent exists in Debian/Proxmox.
+
+### /etc/network/interfaces on Gentoo
+
+`/etc/network/interfaces` is **kept and used** in the Gentoo port:
+
+| Operation | Used? | Notes |
+|---|---|---|
+| PVE reads for web UI display | ✅ YES | PVE::INotify reads it |
+| PVE writes when saving changes | ✅ YES | Written to interfaces.new, then renamed on Apply |
+| OS applies on boot automatically | ❌ NO | Backend config files (networkd/NM/netifrc) used instead |
+| OS applies after "Apply Config" | ✅ YES via shim | pve-ifreload reads it and translates |
+
+### Behavioral changes from upstream Proxmox
+
+| Change | Severity | Details |
+|---|---|---|
+| `ifreload -a` → `/usr/sbin/pve-ifreload` | BEHAVIORAL | pve-manager patched to prefer pve-ifreload when present |
+| `assert_ifupdown2_installed()` softened | BEHAVIORAL | Now accepts pve-ifreload OR ifupdown2; dies with helpful message |
+| networkd backend writes /run (volatile) | CRITICAL LIMITATION | vmbr0 disappears on reboot without persistent backend config |
+| Bond interfaces not supported | LIMITATION | pve-ifreload doesn't parse bond stanzas yet |
+| OVS bridge type not supported | LIMITATION | Gentoo port uses Linux bridges only |
+| ifupdown2 pre-up/post-up hooks ignored | LIMITATION | Use systemd units or OpenRC service scripts instead |
+
+### Key design decision
+
+`/etc/network/interfaces` is kept as the PVE source-of-truth because:
+1. PVE::INotify is deeply integrated and would require invasive changes to bypass
+2. The file format is well-understood and the subset PVE generates is translateable
+3. The shim approach keeps the PVE code changes minimal (one patch file)
+4. Users can inspect what PVE "thinks" the network is by reading one standard file
+
+**Full documentation**: `docs/networking/gentoo-networking.md`
