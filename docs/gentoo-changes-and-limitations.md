@@ -405,3 +405,16 @@ Required by `PVE::Storage::PBSPlugin` — without it `PVE::Storage` fails to loa
 | `bcache-tools` not required | TRANSPARENT | Debian listed it as dep; Diskmanage.pm only reads sysfs paths, never calls bcache binary |
 | Shell completions + man page skipped | DIFFERENT | Same reason as libpve-access-control (pve-doc-generator not ported) |
 | All plugin .pm files always installed | TRANSPARENT | PVE::Storage hard-uses all plugins at load time; USE flags only gate system tools |
+
+---
+
+## dev-perl/libpve-guest-common-perl (6.0.2)
+
+**Purpose:** Shared base modules for VMs (qemu-server) and containers (pve-container).
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| `proxmox-websocket-tunnel` binary not yet ported | DEGRADED | Live migration tunneling (`PVE::Tunnel::fork_websocket_tunnel`) fails; local guest operations unaffected |
+| `libpve-cluster-perl` not yet ported | DEGRADED | `ReplicationConfig`/`ReplicationState`/`AbstractConfig` cluster reads fail on single-node; non-replicated local VMs/CTs unaffected |
+| All CPAN deps in tree | TRANSPARENT | JSON, URI, Time::HiRes, IPC::Open2 (core) |
+| Sourced from upstream proxmox.com git (no pxvirt fork) | TRANSPARENT | No pxvirt-specific patches in pve-guest-common |

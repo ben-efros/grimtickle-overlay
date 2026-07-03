@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Common guest-related Perl modules shared between qemu-server (VMs) and
+    pve-container (LXC). Provides:
+
+      PVE::AbstractConfig    — base config class for QEMU and LXC configs
+      PVE::AbstractMigrate   — base migration logic (local + live)
+      PVE::GuestHelpers      — shared guest lifecycle helpers
+      PVE::Replication{,Config,State} — storage replication framework
+      PVE::StorageTunnel     — storage migration tunnel (uses websocket-tunnel binary)
+      PVE::Tunnel            — migration tunnel setup and teardown
+      PVE::Mapping::{Dir,PCI,USB} — hardware/directory mapping configs
+      PVE::VZDump::{Common,JobBase,Plugin} — backup framework base classes
+
+    Runtime: proxmox-websocket-tunnel (Rust binary, not yet ported) is needed
+    only for live migration; local guest operations work without it.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-guest-common.git</remote-id>
+  </upstream>
+</pkgmetadata>
