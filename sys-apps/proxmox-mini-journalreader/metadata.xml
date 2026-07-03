@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Minimal systemd journal reader spawned by pveproxy to serve the node
+    system log view in the pxvirt web UI. Reads the last N lines of the
+    journal (or lines before a cursor) and outputs them for display.
+
+    Hard dependency of sys-apps/pve-manager — emerge will refuse to install
+    pve-manager without this package.
+
+    Single C source file linking against libsystemd via pkg-config.
+    Installs to /usr/libexec/proxmox-mini-journalreader.
+  </longdescription>
+</pkgmetadata>
