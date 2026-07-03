@@ -27,6 +27,7 @@ Gentoo/Portage build environment.
 | [dependency-implications.md](dependency-implications.md) | **What breaks if a package is missing** — severity ratings and workarounds |
 | [single-node-bootstrap.md](single-node-bootstrap.md) | **Running pve-manager without pve-cluster** on a standalone node |
 | [packages/README.md](packages/README.md) | Full dependency table and portage category assignments |
+| [gentoo-changes-and-limitations.md](gentoo-changes-and-limitations.md) | **All Gentoo-specific changes, functional limitations, and behaviour differences** |
 
 ---
 
