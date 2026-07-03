@@ -21,6 +21,7 @@ Gentoo/Portage build environment.
 |------|-------------|
 | [overview.md](overview.md) | What pxvirt is, why Gentoo, overlay architecture |
 | [porting-plan.md](porting-plan.md) | Phased porting roadmap, Gentoo tree audit results, package status table |
+| [perl-module-audit.md](perl-module-audit.md) | **Perl module gap audit** — all modules confirmed in Gentoo tree; one pve-manager patch needed |
 | [networking.md](networking.md) | VM bridge setup for systemd-networkd and NetworkManager |
 | [build-guide.md](build-guide.md) | Overlay setup, USE flags, emerge commands, keyword unmasking |
 | [dependency-implications.md](dependency-implications.md) | **What breaks if a package is missing** — severity ratings and workarounds |

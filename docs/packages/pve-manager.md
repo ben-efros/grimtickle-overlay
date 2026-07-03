@@ -15,9 +15,31 @@
 - **Debian package:** `pve-manager`
 - **Build system:** Makefile + Perl
 
-## Portage Atom
+## Gentoo-Specific Patches Required
 
-```
+### Patch 1: Stub `PVE::API2::APT` (startup blocker)
+
+`PVE/API2/Nodes.pm` line 42 contains a compile-time `use PVE::API2::APT`, which
+in turn requires `AptPkg::Cache` (from `libapt-pkg-perl`). This Debian-only library
+does not exist on Gentoo. Without patching, **`pvedaemon` crashes at startup**.
+
+**Patch:** `files/0001-Gentoo-stub-PVE-API2-APT-libapt-pkg-perl-unavailable.patch`
+
+This patch replaces `PVE/API2/APT.pm` with a stub that:
+- Satisfies `Nodes.pm`'s `use PVE::API2::APT` without crashing
+- Returns HTTP 501 for all `/nodes/{node}/apt/*` endpoints with a message
+  directing users to use `emerge` instead
+
+**Affected features** (unavailable on Gentoo — Debian-only):
+- Web UI "Updates" tab: package update check / apply
+- `pvesh get /nodes/{node}/apt/versions`
+- Repository management via web UI
+
+**Unaffected:** All VM, CT, storage, user, network, firewall management.
+
+See `docs/perl-module-audit.md` for full analysis.
+
+
 sys-apps/pve-manager
 ```
 

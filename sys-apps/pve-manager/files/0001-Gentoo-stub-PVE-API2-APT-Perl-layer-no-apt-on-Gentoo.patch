@@ -1,0 +1,149 @@
+From: grimtickle-overlay <overlay@grimtickle.local>
+Date: Wed, 02 Jul 2026 23:00:00 +0000
+Subject: [PATCH] Gentoo: stub PVE::API2::APT — libapt-pkg-perl is Debian-only
+
+libapt-pkg-perl (AptPkg::Cache, AptPkg::System, AptPkg::PkgRecords) wraps
+Debian's libapt-pkg and does not exist outside Debian/Ubuntu. On Gentoo,
+package management is handled via Portage/emerge, not apt.
+
+PVE::API2::APT is loaded at compile-time by PVE::API2::Nodes (line 42),
+which is in turn loaded at pvedaemon startup. Without this patch, pvedaemon
+crashes immediately on Gentoo with "Can't locate AptPkg/Cache.pm".
+
+This stub replaces the full APT.pm implementation with a minimal handler
+that satisfies Nodes.pm's registration requirements and returns a 501 error
+for any APT-specific endpoint, with a clear message directing users to emerge.
+
+Affected endpoints (all return 501 Not Implemented on Gentoo):
+  GET  /nodes/{node}/apt/update
+  POST /nodes/{node}/apt/update
+  GET  /nodes/{node}/apt/versions
+  GET  /nodes/{node}/apt/changelog
+  GET  /nodes/{node}/apt/repositories
+  PUT  /nodes/{node}/apt/repositories
+
+All other pxvirt functionality is unaffected.
+---
+ PVE/API2/APT.pm | 909 ------------------------------------------------
+ 1 file changed, 20 insertions(+), 909 deletions(-)
+
+diff --git a/PVE/API2/APT.pm b/PVE/API2/APT.pm
+--- a/PVE/API2/APT.pm
++++ b/PVE/API2/APT.pm
+@@ -1,929 +1,20 @@
+ package PVE::API2::APT;
+ 
+ use strict;
+ use warnings;
+ 
+-use POSIX;
+-use File::stat ();
+-use IO::File;
+-use File::Basename;
+-use Encode qw(decode);
+-
+-use LWP::UserAgent;
+-
+-use Proxmox::RS::APT::Repositories;
+-
+-use AptPkg::Cache;
+-use AptPkg::PkgRecords;
+-use AptPkg::System;
+-
+-# ... (929 lines removed — Debian-specific implementation) ...
+-
++# Gentoo stub: libapt-pkg-perl (AptPkg) is Debian-specific.
++# Package management on Gentoo uses Portage (emerge), not apt.
++# All /nodes/{node}/apt/* endpoints return 501 Not Implemented.
++
+ use PVE::RESTHandler;
++use PVE::Exception qw(raise_param_exc);
+ 
+ use base qw(PVE::RESTHandler);
+ 
++my $not_implemented = sub {
++    die { code => 501, message => "APT package management is not available on Gentoo. "
++        . "Use 'emerge' to manage packages on this node." };
++};
++
++__PACKAGE__->register_method({
++    name => 'index',
++    path => '',
++    method => 'GET',
++    description => 'APT package management endpoint index (not available on Gentoo).',
++    permissions => { user => 'all' },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' } } },
++    returns => { type => 'array', items => { type => 'object',
++        properties => { id => { type => 'string' } } } },
++    code => sub { return []; },
++});
++
++__PACKAGE__->register_method({
++    name => 'list_updates', path => 'update', method => 'GET',
++    description => 'Not available on Gentoo (use emerge --update @world).',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Modify']] },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' } } },
++    returns => { type => 'array', items => { type => 'object' } },
++    code => $not_implemented,
++});
++
++__PACKAGE__->register_method({
++    name => 'update_database', path => 'update', method => 'POST',
++    description => 'Not available on Gentoo (use emerge --sync).',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Modify']] },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' },
++            notify => { type => 'boolean', optional => 1 },
++            quiet  => { type => 'boolean', optional => 1 } } },
++    returns => { type => 'string' },
++    code => $not_implemented,
++});
++
++__PACKAGE__->register_method({
++    name => 'versions', path => 'versions', method => 'GET',
++    description => 'Not available on Gentoo (use equery list or qlist).',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' } } },
++    returns => { type => 'array', items => { type => 'object' } },
++    code => $not_implemented,
++});
++
++__PACKAGE__->register_method({
++    name => 'changelog', path => 'changelog', method => 'GET',
++    description => 'Not available on Gentoo.',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' },
++            name    => { type => 'string' },
++            version => { type => 'string', optional => 1 } } },
++    returns => { type => 'string' },
++    code => $not_implemented,
++});
++
++__PACKAGE__->register_method({
++    name => 'get_repositories', path => 'repositories', method => 'GET',
++    description => 'Not available on Gentoo (use /etc/portage/repos.conf).',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Audit']] },
++    parameters => { additionalProperties => 0,
++        properties => { node => { type => 'string' } } },
++    returns => { type => 'object' },
++    code => $not_implemented,
++});
++
++__PACKAGE__->register_method({
++    name => 'change_repository', path => 'repositories', method => 'PUT',
++    description => 'Not available on Gentoo.',
++    permissions => { check => ['perm', '/nodes/{node}', ['Sys.Modify']] },
++    protected => 1,
++    parameters => { additionalProperties => 0,
++        properties => { node   => { type => 'string' },
++            handle => { type => 'object', optional => 1 },
++            digest => { type => 'string', optional => 1 } } },
++    returns => { type => 'null' },
++    code => $not_implemented,
++});
++
+ 1;

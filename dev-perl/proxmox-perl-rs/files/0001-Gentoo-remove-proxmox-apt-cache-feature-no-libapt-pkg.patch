@@ -1,0 +1,30 @@
+From: grimtickle-overlay <overlay@grimtickle.local>
+Date: Wed, 02 Jul 2026 23:00:00 +0000
+Subject: [PATCH 1/2] Gentoo: remove proxmox-apt "cache" feature — no libapt-pkg on Gentoo
+
+The "cache" feature of the proxmox-apt crate enables FFI bindings against
+Debian's libapt-pkg C library (via the apt-pkg crate). libapt-pkg does not
+exist in the Gentoo portage tree and is Debian/Ubuntu-only.
+
+Remove the "cache" feature from pve-rs's Cargo.toml dependency entry.
+Without it, the APT repository list/add/change functions still compile
+(they manipulate .sources.list files in pure Rust), but the cache-dependent
+functions (list_available_apt_update, update_database) are not built.
+
+The companion patch stubs those functions at the Rust export level so that
+perlmod-generated XS bindings still compile and return a clear error when
+called from Perl (which they are not, since PVE::API2::APT is also stubbed).
+
+---
+ pve-rs/Cargo.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pve-rs/Cargo.toml b/pve-rs/Cargo.toml
+--- a/pve-rs/Cargo.toml
++++ b/pve-rs/Cargo.toml
+@@ -33,7 +33,7 @@ perlmod = { version = "0.13.5", features = ["exporter"] }
+ 
+-proxmox-apt = { version = "0.11.5", features = ["cache"] }
++proxmox-apt = { version = "0.11.5" }
+ proxmox-apt-api-types = "1.0"
+ proxmox-config-digest = "0.1"
