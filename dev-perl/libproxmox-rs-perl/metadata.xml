@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Pure Perl bridge package — no Rust compilation. Generates thin
+    Proxmox::RS::* stub modules via perlmod-bin's genpackage.pl using
+    --lib=- (delegating to whichever Rust library is already loaded:
+    Proxmox::Lib::PVE from libpve-rs-perl, or Proxmox::Lib::PMG).
+
+    Installs:
+      Proxmox::Lib::Common    — delegates .so loading to PVE or PMG loader
+      Proxmox::Lib::SslProbe  — pure Perl openssl cert path probe
+      PVE::RS::CalendarEvent  — compat alias (deprecated)
+      Proxmox::RS::APT::Repositories
+      Proxmox::RS::CalendarEvent
+      Proxmox::RS::Notify
+      Proxmox::RS::OIDC
+      Proxmox::RS::SharedCache
+      Proxmox::RS::Subscription
+
+    Required by: libpve-access-control, libpve-common-perl (runtime)
+  </longdescription>
+  <upstream>
+    <remote-id type="github">jiangcuo/proxmox-perl-rs</remote-id>
+    <remote-id type="git">https://git.proxmox.com/?p=proxmox-perl-rs.git</remote-id>
+  </upstream>
+</pkgmetadata>
