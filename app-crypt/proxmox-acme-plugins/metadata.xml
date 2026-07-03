@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Bundled acme.sh DNS API plugins plus the proxmox-acme wrapper script,
+    used to fulfil DNS-01 ACME challenges for Let's Encrypt certificate
+    issuance. Includes 150+ DNS provider plugins (Cloudflare, AWS Route53,
+    Gandi, OVH, Hetzner, etc.).
+
+    NOTE: This bundles acme.sh 3.1.1 rather than using the system
+    app-crypt/acme-sh package, because the proxmox-acme wrapper script
+    uses an internal API not present in stock acme.sh releases.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=proxmox-acme.git</remote-id>
+  </upstream>
+</pkgmetadata>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Perl ACME (RFC 8555 / Let's Encrypt) client library used by pxvirt
+    for automated TLS certificate management. Provides:
+      PVE::ACME            — ACME protocol client (JWS, account, order)
+      PVE::ACME::Challenge — base class for challenge handlers
+      PVE::ACME::DNSChallenge — DNS-01 challenge via acme.sh plugins
+      PVE::ACME::StandAlone   — HTTP-01 standalone challenge server
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=proxmox-acme.git</remote-id>
+  </upstream>
+</pkgmetadata>
