@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    xterm.js 5.5.0 frontend assets for the pxvirt shell/console terminal.
+    Provides the HTML template and pre-built JS/CSS files served by pveproxy
+    at /xtermjs/* for host shell access and container consoles.
+
+    This package covers only the static JS/CSS frontend. The backend WebSocket
+    proxy is sys-apps/proxmox-termproxy (a Rust binary). Both are required for
+    a working xterm.js console in the pxvirt web UI.
+
+    Source: pre-extracted npm tarballs committed to git.proxmox.com/git/pve-xtermjs.git
+    (xterm.js 5.5.0, addon-fit 0.9.0, addon-webgl 0.17.0).
+  </longdescription>
+  <upstream>
+    <remote-id type="github">xtermjs/xterm.js</remote-id>
+  </upstream>
+</pkgmetadata>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    WebSocket-to-PTY proxy used by pveproxy as the backend for xterm.js
+    terminal sessions (host shell, container console). Written in Rust.
+
+    This package is the binary half of pve-xtermjs. The JS frontend
+    is www-apps/pve-xtermjs. Both are required for working terminal
+    consoles in the pxvirt web UI.
+
+    DEFERRED: ebuild skeleton only — cargo vendor tarball not yet generated.
+    See docs/packages/termproxy.md for completion instructions.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">proxmox/proxmox-termproxy</remote-id>
+  </upstream>
+</pkgmetadata>
