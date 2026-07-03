@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Proxmox VE cluster REST API endpoints (/cluster/*) and pvecm command.
+    Provides PVE::API2::Cluster*, PVE::CLI::pvecm, PVE::Cluster::Setup
+    (node join/leave, SSL certificate management).
+
+    Runtime tools: faketime (sys-libs/libfaketime) for cert date manipulation,
+    rsync for node data sync, openssl for certificate operations.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-cluster.git</remote-id>
+  </upstream>
+</pkgmetadata>

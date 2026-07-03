@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="test">Run pmxcfs unit tests (requires dev-libs/check)</flag>
+  </use>
+  <longdescription>
+    pmxcfs — the Proxmox cluster filesystem FUSE daemon. Provides /etc/pve/
+    as a distributed, corosync-backed, SQLite-persisted configuration
+    filesystem. Also builds IPCC.so (Perl XS IPC bridge to pmxcfs via libqb)
+    and installs PVE::Cluster, PVE::IPCC, PVE::Cluster::IPCConst.
+
+    Source: upstream proxmox.com pve-cluster 9.1.6 (newer and more secure
+    than pxvirt 9.0.6 — see docs/packages/pve-cluster-moddoc.md).
+    One pxvirt patch applied: /cluster/vmlist UUID endpoint.
+
+    Single-node operation: pmxcfs runs in local mode without corosync.
+    See pkg_postinst() for bootstrap instructions.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-cluster.git</remote-id>
+  </upstream>
+</pkgmetadata>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Pure Perl cluster library modules: PVE::Corosync (config parse/write),
+    PVE::DataCenterConfig (datacenter.cfg schema), PVE::RRD (metrics, requires
+    net-analyzer/rrdtool[perl,graph]), PVE::SSHInfo (key/fingerprint helpers),
+    PVE::Notify (notification dispatcher using Proxmox::RS::Notify).
+
+    Merges Debian's libpve-cluster-perl and libpve-notify-perl into one package.
+    RDEPEND on net-analyzer/rrdtool[perl,graph] is mandatory (graph USE is
+    required when perl USE is enabled, per rrdtool ebuild).
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-cluster.git</remote-id>
+  </upstream>
+</pkgmetadata>

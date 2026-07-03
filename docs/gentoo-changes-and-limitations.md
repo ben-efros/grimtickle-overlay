@@ -442,3 +442,29 @@ Required by `PVE::Storage::PBSPlugin` — without it `PVE::Storage` fails to loa
 | `node/APT.js` / `node/APTRepositories.js` installed but non-functional | DIFFERENT | JS APT panel renders empty; matches the Perl APT stub in proxmox-perl-rs. No apt backend on Gentoo — APT repository manager tab shows nothing |
 | `pve-eslint` linting skipped | TRANSPARENT | Only needed for CI/quality checks, not for the installed artifact |
 | Markdown rendering uses marked 9.1.6 | TRANSPARENT | Bundled into proxmoxlib.js; affects task notes / UI markdown views |
+
+---
+
+## sys-cluster/pve-cluster (9.1.6) + dev-perl/libpve-{cluster,cluster-api}-perl
+
+**Source**: Upstream proxmox.com 9.1.6 (NOT pxvirt 9.0.6). Upstream is newer and contains
+all pxvirt features plus critical security/correctness fixes pxvirt lacked.
+
+**Key finding**: All pxvirt additions (WireGuard paths, SDN paths, token-coefficient,
+HA auto-rebalance, dynamic CRS mode) were already merged into upstream 9.1.6. Only the
+`/cluster/vmlist` UUID endpoint required a patch.
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| Based on upstream 9.1.6, not pxvirt 9.0.6 | TRANSPARENT | Upstream is strictly better; all pxvirt features present |
+| 1 pxvirt patch applied: `/cluster/vmlist` | TRANSPARENT | UUID-annotated VM list API endpoint |
+| 4 pxvirt changes NOT applied (security/correctness) | BETTER | stmt_update_entry dead code, 0755 permissions, /tmp SSL race, missing RRD fix — all rejected |
+| IPCC.so built from IPCC.xs at emerge time | TRANSPARENT | Uses xsubpp + libqb; installed to vendorarch auto-load path |
+| IPCConst.pm generated from cfs-ipc-ops.h via awk | TRANSPARENT | Perl constants for IPC opcodes |
+| Shell completions and man pages skipped | DIFFERENT | pve-doc-generator not yet ported |
+| OpenRC init script provided alongside systemd unit | DIFFERENT | Both installed; use whichever init system is active |
+| rrdcached socket path: verify on Gentoo | LOW RISK | If /run/rrdcached.sock path differs, metrics will not update |
+| Debian package split: 4 → 3 Gentoo packages | DIFFERENT | libpve-notify-perl merged into libpve-cluster-perl |
+| Single-node mode: pmxcfs runs without corosync | TRANSPARENT | Local mode; /etc/pve/ served from SQLite without replication |
+| FUSE kernel module required | TRANSPARENT | CONFIG_FUSE_FS; checked via linux-info |
+| sysctl 10-pve-cluster.conf installed | TRANSPARENT | bridge-nf bypass + aio-max-nr; needed for VMs/containers |

@@ -1,0 +1,100 @@
+--- a/src/PVE/API2/ClusterConfig.pm	2026-07-03 07:11:41.525108979 -0700
++++ b/src/PVE/API2/ClusterConfig.pm	2026-07-03 08:45:49.020003728 -0700
+@@ -13,6 +13,8 @@
+ use PVE::APIClient::LWP;
+ use PVE::Corosync;
+ use PVE::Cluster::Setup;
++use PVE::AccessControl;
++use JSON;
+ 
+ use IO::Socket::UNIX;
+ 
+@@ -59,12 +61,88 @@
+             { name => 'join' },
+             { name => 'qdevice' },
+             { name => 'apiversion' },
++            { name => 'vmlist' },
+         ];
+ 
+         return $result;
+     },
+ });
+ 
++
++__PACKAGE__->register_method({
++    name => 'vmlist',
++    path => 'vmlist',
++    method => 'GET',
++    description => "VM list with UUID support (pxvirt extension).",
++    permissions => {
++        check => ['perm', '/', [ 'Sys.Audit' ]],
++    },
++    protected => 1,
++    parameters => {
++        additionalProperties => 0,
++        properties => {},
++    },
++    returns => {
++        type => 'array',
++    },
++    code => sub {
++        my ($param) = @_;
++        my $rpcenv = PVE::RPCEnvironment::get();
++        my $authuser = $rpcenv->get_user();
++        if ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser)) {
++            die "only root\@pam can access this API\n";
++        }
++        my $vm_list = [];
++        my $vmlist_path = '/etc/pve/.vmlist';
++
++        open(my $fh, '<', $vmlist_path) or do {
++            warn "cannot open vmlist: $!\n";
++            return $vm_list;
++        };
++        local $/;
++        my $vmlist_content = <$fh>;
++        close($fh);
++
++        my $vmlist_data;
++        eval { $vmlist_data = decode_json($vmlist_content); };
++        if ($@) {
++            warn "cannot parse vmlist: $@\n";
++            return $vm_list;
++        }
++
++        if ($vmlist_data && $vmlist_data->{ids}) {
++            for my $vmid (keys %{$vmlist_data->{ids}}) {
++                my $vm_info = $vmlist_data->{ids}->{$vmid};
++                next unless $vm_info->{node} && $vm_info->{type};
++
++                my $vm_entry = {
++                    vmid    => int($vmid),
++                    node    => $vm_info->{node},
++                    type    => $vm_info->{type},
++                    version => $vm_info->{version} || 0,
++                };
++
++                my $vm_type = $vm_info->{type} eq 'qemu' ? 'qemu-server' : $vm_info->{type};
++                my $config_path = "/etc/pve/nodes/$vm_info->{node}/$vm_type/$vmid.conf";
++                if (open(my $conf_fh, '<', $config_path)) {
++                    while (my $line = <$conf_fh>) {
++                        chomp $line;
++                        if ($line =~ /^uuid:\s*(.+)$/) {
++                            my $uuid = $1;
++                            $uuid =~ s/^\s+|\s+$//g;
++                            $vm_entry->{uuid} = $uuid if $uuid;
++                            last;
++                        }
++                    }
++                    close($conf_fh);
++                }
++                push @$vm_list, $vm_entry;
++            }
++        }
++        return $vm_list;
++    },
++});
++
+ __PACKAGE__->register_method({
+     name => 'join_api_version',
+     path => 'apiversion',

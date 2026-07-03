@@ -1,0 +1,45 @@
+#!/sbin/openrc-run
+# Copyright 2025 Gentoo Authors
+# Distributed under the terms of the GNU General Public License v2
+
+description="Proxmox VE cluster filesystem (pmxcfs)"
+pidfile="/run/pve-cluster.pid"
+command="/usr/bin/pmxcfs"
+command_background="false"  # pmxcfs daemonizes itself
+
+depend() {
+	need net
+	use corosync rrdcached
+	after net corosync rrdcached
+	before pvedaemon pvescheduler pvestatd
+}
+
+start_pre() {
+	# Ensure kernel FUSE module is loaded
+	if ! grep -q "^fuse " /proc/modules 2>/dev/null; then
+		modprobe fuse 2>/dev/null || ewarn "Could not load fuse kernel module"
+	fi
+
+	# Ensure the database directory exists (pmxcfs creates it too, but
+	# doing it here with the right mode is safer)
+	checkpath -d -m 0750 -o root:root /var/lib/pve-cluster
+
+	# Apply sysctl settings needed for VM/CT networking
+	sysctl -p /usr/lib/sysctl.d/10-pve-cluster.conf >/dev/null 2>&1 || true
+}
+
+start() {
+	ebegin "Starting pmxcfs"
+	start-stop-daemon --start \
+		--pidfile "${pidfile}" \
+		--exec "${command}"
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping pmxcfs"
+	start-stop-daemon --stop \
+		--pidfile "${pidfile}" \
+		--retry "TERM/10/KILL/5"
+	eend $?
+}
