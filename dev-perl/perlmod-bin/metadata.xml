@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Contains genpackage.pl, the build-time helper script that generates
+    Perl package wrapper files for cdylibs built with the perlmod Rust crate.
+    Each generated package file delegates symbol lookups into the shared
+    library, allowing Perl code to call Rust functions via XS without
+    hand-written XS glue.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=perlmod.git</remote-id>
+  </upstream>
+</pkgmetadata>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    The pve-rs workspace from the proxmox-perl-rs repository. Compiles
+    Rust code into a cdylib (libpve_rs.so) and generates Perl wrapper
+    modules via perlmod-bin's genpackage.pl.
+
+    Provides the following Perl packages used by the pxvirt management
+    stack at runtime:
+      - Proxmox::Lib::PVE      — shared library loader
+      - PVE::RS::APT::Repositories — APT repo management (stubbed on Gentoo)
+      - PVE::RS::Firewall::SDN — SDN firewall support
+      - PVE::RS::OpenId        — OIDC authentication
+      - PVE::RS::ResourceScheduling::Static — HA resource scheduling
+      - PVE::RS::TFA           — Two-factor authentication
+
+    Gentoo-specific changes:
+      - proxmox-apt "cache" feature removed (no libapt-pkg on Gentoo)
+      - APT cache XS exports stubbed to return errors at runtime
+      - Vendor tarball includes Proxmox monorepo crates (April 2025 snapshot)
+        and perlmod 0.13.6 from the pxvirt perlmod submodule
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=proxmox-perl-rs.git</remote-id>
+    <remote-id type="github">jiangcuo/proxmox-perl-rs</remote-id>
+  </upstream>
+</pkgmetadata>

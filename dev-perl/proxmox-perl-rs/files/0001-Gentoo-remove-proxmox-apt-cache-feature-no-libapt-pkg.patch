@@ -22,7 +22,8 @@ called from Perl (which they are not, since PVE::API2::APT is also stubbed).
 diff --git a/pve-rs/Cargo.toml b/pve-rs/Cargo.toml
 --- a/pve-rs/Cargo.toml
 +++ b/pve-rs/Cargo.toml
-@@ -33,7 +33,7 @@ perlmod = { version = "0.13.5", features = ["exporter"] }
+@@ -31,7 +31,7 @@ crate-type = ["cdylib"]
+ perlmod = { version = "0.13.5", features = ["exporter"] }
  
 -proxmox-apt = { version = "0.11.5", features = ["cache"] }
 +proxmox-apt = { version = "0.11.5" }
