@@ -332,3 +332,222 @@ This is sufficient for a single-node hypervisor without clustering.
 | rrdcached socket path mismatch | LOW | Document and verify after install |
 | xsubpp version sensitivity | LOW | BDEPEND on `dev-perl/ExtUtils-MakeMaker` |
 | pmxcfs local mode behavior differences vs clustered mode | MEDIUM | Test and document |
+
+---
+
+## §8 — Contested pxvirt Changes: Full Analysis and Recommendations
+
+This section documents every pxvirt change the Gentoo port disagrees with,
+explains the rationale, and specifies what we use instead.
+
+---
+
+### 8.1 `pmxcfs/database.c` — `stmt_update_entry` is DEAD CODE
+
+**pxvirt adds:**
+```c
+sqlite3_stmt *stmt_update_entry;             // struct field
+static char *sql_update_entry = "UPDATE tree SET ...";  // SQL string
+sqlite3_prepare_v3(..., sql_update_entry, ..., &bdb->stmt_update_entry, ...); // init
+sqlite3_finalize(bdb->stmt_update_entry);    // cleanup
+```
+
+**The problem:** `stmt_update_entry` is **never called**. The actual write path in
+both pxvirt and upstream uses:
+```c
+sqlite3_stmt *stmt = (inode > version) ? bdb->stmt_insert_entry : bdb->stmt_replace_entry;
+rc = backend_write_inode(bdb->db, stmt, ...);
+```
+`stmt_update_entry` is initialized and finalized but never bound or stepped.
+It is dead code.
+
+**Additional harm**: pxvirt's init has a `goto fail` on `sqlite3_prepare_v3` for this
+statement. If the prepare fails for any reason, database initialization fails entirely —
+for a statement that is never used.
+
+**pxvirt also misses** an upstream bugfix present in the same file:
+```c
+// upstream adds sqlite3_close(db) in error path (line 107):
+if (rc != SQLITE_OK) {
+    sqlite3_close(db);   // ← pxvirt MISSING this — connection leak on init failure
+    return NULL;
+}
+```
+
+**Decision:** Use upstream `database.c` as-is.
+- Dead code removed
+- Connection leak on init failure fixed (upstream bugfix)
+- No `goto fail` for an unused prepared statement
+
+**Patch status:** Patch 0005 from §2.7 is **cancelled**. Not applied.
+
+---
+
+### 8.2 `pmxcfs/status.c` — RRD Definition Removal is Safe (but permissions are wrong)
+
+**What pxvirt removes:**
+- `rrd_def_node[]` — PVE2-era RRD schema for nodes
+- `rrd_def_vm[]` — PVE2-era RRD schema for VMs
+- `rrd_def_storage[]` — PVE2-era RRD schema for storage
+- The migration logic that checks for `pve2-node/`, `pve2-vm/`, `pve2-storage/` dirs
+- `filename_pve2` pointer tracking for all three entity types
+- `use_pve2_file` flag logic
+
+**Why pxvirt did this:** pxvirt targets ARM64/LoongArch as a fresh platform. There are
+no PVE2.x installations to migrate from. The `rrd_def_*` legacy arrays are ONLY used
+when a `pve2-*` directory already exists in the RRD data dir — which only happens on
+systems upgrading from Proxmox VE 2.x (2013 era). On a fresh install, code path never
+reaches these arrays.
+
+**Assessment:** The RRD removal is correct and intentional. It is NOT a bug.
+Fresh Gentoo installs will never have `pve2-*` directories.
+
+**However — permissions are wrong in pxvirt:**
+
+pxvirt's simplified code uses `0755` for `checked_mkdir` calls in the RRD creation path:
+```c
+checked_mkdir(RRDDIR "/pve-node-9.0", 0755);  // pxvirt — too permissive
+checked_mkdir(dir, 0755);                      // pxvirt
+```
+
+Upstream correctly uses `0750`:
+```c
+checked_mkdir(RRDDIR "/pve-node-9.0", 0750);  // upstream — correct
+checked_mkdir(dir, 0750);                      // upstream
+```
+
+**Decision:** Use upstream `status.c` as the base. Apply pxvirt's WireGuard and SDN
+path additions as patch 0002, but do NOT apply pxvirt's simplified RRD creation path.
+
+**Why upstream is better here:**
+- Upstream has the same net result for fresh installs (no pve2 dirs = same code path)
+- Upstream uses `0750` (restricts RRD dir to owner only)
+- Upstream code is better documented and tested
+- If an admin has PVE2 data they want to preserve, upstream handles it gracefully
+
+**Patch 0002** applies only the private file additions:
+```diff
++    {.path = "priv/wg-keys.cfg"},
+...
++    {.path = "sdn/route-maps.cfg"},
++    {.path = "sdn/prefix-lists.cfg"},
+```
+
+---
+
+### 8.3 `pmxcfs/pmxcfs.c` — Directory Permissions Too Permissive
+
+**pxvirt:**
+```c
+mkdir(VARLIBDIR, 0755);  // /var/lib/pve-cluster
+mkdir(RUNDIR,    0755);  // /run/pve-cluster
+mkdir(CFSDIR,    0755);  // /etc/pve
+```
+
+**Upstream:**
+```c
+mkdir(VARLIBDIR, 0750);
+mkdir(RUNDIR,    0750);
+mkdir(CFSDIR,    0750);
+```
+
+**The problem:** `/etc/pve/priv/` contains private SSL keys, shadow credentials, and
+auth tokens. World-readable (`0755`) parent directories mean any local user can attempt
+to enumerate and access sensitive cluster config. `0750` (owner + group readable only)
+is correct.
+
+**Decision:** Use upstream `pmxcfs.c` as-is. The permission tightening is the right call.
+No patch needed — upstream is correct.
+
+---
+
+### 8.4 `PVE/Cluster/Setup.pm` — Legacy SSL Config File in /tmp
+
+**pxvirt uses:**
+```perl
+my $cfgfn = "/tmp/pvesslconf-$$.tmp";    # temp file in world-writable /tmp
+my $fh = IO::File->new($cfgfn, "w");
+print $fh $sslconf;
+close($fh);
+# ... then:
+'-config', $cfgfn,                        # passes to openssl
+```
+
+**Upstream uses:**
+```perl
+my $reqfn = "/run/pve-cluster/pvecertreq-$$.tmp";  # temp in service-owned dir
+# Uses -addext directly:
+'-addext', 'keyUsage=critical,keyCertSign,cRLSign',
+```
+
+**Problems with pxvirt's approach:**
+
+1. **`/tmp` race condition (TOCTOU)**: Writing a config file to world-writable `/tmp`
+   is a classic symlink attack vector. A local user could pre-create a symlink at
+   `/tmp/pvesslconf-$$.tmp` before root runs `pvecm` and cause the config to be written
+   to an attacker-controlled location.
+
+2. **`/run/pve-cluster/` is safer**: This directory is created as `0750` by pmxcfs and
+   owned by root. Only root can write there — no symlink race.
+
+3. **pxvirt's SAN construction is different:**
+   pxvirt (correct order): resolve IP → append to names → then read DNS config  
+   Upstream (cleaner): build `names` string inline  
+   No functional difference but pxvirt reads `resolvconf` after setting `$names` —
+   slightly confusing order.
+
+4. **`-addext` requires OpenSSL ≥ 1.1.1** (2018): All modern Gentoo systems have
+   OpenSSL ≥ 3.x. This is not a compatibility concern.
+
+**Decision:** Use upstream `Setup.pm`. The `/run/pve-cluster/` temp path and `-addext`
+approach are safer and cleaner.
+
+---
+
+### 8.5 `PVE/RRD.pm` — pxvirt Misses Critical Upstream Bug Fix
+
+**What upstream adds that pxvirt lacks:**
+```perl
+my $get_rrd_data = sub {
+    my ($rrd, $cf, $is_node, $reso, $args, $res) = @_;
+    ...
+    # Handles the memavailable/memfree rename:
+    $entry->{memavailable} = $val
+        if $is_node && $name eq 'memfree' && !exists($entry->{memavailable});
+```
+
+**The `memfree`/`memavailable` issue:** Proxmox VE 8.x renamed the RRD data source
+`memfree` to `memavailable` to more accurately reflect the Linux `MemAvailable` field
+(which accounts for reclaimable caches). Existing RRD databases have `memfree`.
+
+Without the upstream fix, nodes with pre-existing RRD data will:
+- Show `memavailable = undefined` for old time ranges
+- Charts will have gaps where the old field name was used
+- The `get_old_rrd_path_if_exist` helper also handles the `.old` suffix migration
+
+**Decision:** Use upstream `RRD.pm`. This is not a pxvirt feature, it is a pxvirt bug.
+No patch — upstream code is used directly.
+
+---
+
+### Summary: Revised Patch Set
+
+| Patch | Status | Reason |
+|-------|--------|--------|
+| 0001 — `/cluster/vmlist` UUID endpoint | ✅ APPLY | Legitimate pxvirt feature |
+| 0002 — WireGuard + SDN path whitelist | ✅ APPLY (trimmed) | Private file additions only; no permission changes |
+| 0003 — `token-coefficient` in Corosync.pm | ✅ APPLY | Legitimate pxvirt feature |
+| 0004 — HA auto-rebalance in DataCenterConfig.pm | ✅ APPLY | Legitimate pxvirt feature |
+| 0005 — `stmt_update_entry` prepared stmt | ❌ CANCELLED | Dead code; adds pointless failure mode |
+
+| File | Decision | Reason |
+|------|----------|--------|
+| `pmxcfs/database.c` | Use upstream | Dead code removed; has connection leak fix |
+| `pmxcfs/pmxcfs.c` | Use upstream | `0750` permissions are more secure |
+| `pmxcfs/status.c` | Use upstream + patch 0002 | `0750` RRD dirs; preserves PVE2 migration path for safety |
+| `PVE/Cluster/Setup.pm` | Use upstream | No `/tmp` race; `-addext` is modern and safe |
+| `PVE/RRD.pm` | Use upstream | Critical memfree/memavailable fix pxvirt is missing |
+| `PVE/Cluster.pm` | Use upstream + patch 0002 path additions | Better lock precision; upstream bug fixes |
+| `PVE/Corosync.pm` | Use upstream + patch 0003 | token-coefficient is useful feature |
+| `PVE/DataCenterConfig.pm` | Use upstream + patch 0004 | HA auto-rebalance is useful feature |
+| `PVE/API2/ClusterConfig.pm` | Use upstream + patch 0001 | vmlist UUID endpoint is useful feature |
