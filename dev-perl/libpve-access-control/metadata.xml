@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Role-based access control library for Proxmox VE. Provides user/group/realm
+    management, permission checking, TFA (TOTP/FIDO2/recovery keys), LDAP/AD
+    integration, OpenID Connect (Proxmox::RS::OIDC via libproxmox-rs-perl), and
+    API endpoints under /access/.
+
+    Note: Runtime depends on libpve-cluster-perl (pmxcfs) to read /etc/pve/user.cfg.
+    On single-node systems without pmxcfs, /etc/pve/ must be a plain directory
+    seeded with minimal config files (see docs/packages/pve-access-control.md).
+
+    Shell completions and man page generation are skipped; pve-doc-generator
+    is not yet ported.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">jiangcuo/pve-access-control</remote-id>
+  </upstream>
+</pkgmetadata>
