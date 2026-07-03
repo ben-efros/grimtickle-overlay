@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    lxc-pve is the pxvirt fork of Linux Containers (LXC), patched for use
+    with the pxvirt virtualization platform (a Proxmox VE fork for ARM64 and
+    LoongArch). It includes security patches to harden AppArmor profiles,
+    a fix for NSS-related segfaults in lxc-attach, and AppArmor profile
+    updates to support user namespace creation and the abi directive.
+
+    This package conflicts with app-emulation/lxc (if that package were
+    present in the Gentoo tree) and should be used in conjunction with
+    app-emulation/pve-container for pxvirt-managed containers.
+  </longdescription>
+  <use>
+    <flag name="apparmor">Enable AppArmor MAC profile support for containers</flag>
+    <flag name="capabilities">Enable POSIX capabilities support via libcap</flag>
+    <flag name="criu">Enable checkpoint/restore support via CRIU</flag>
+    <flag name="doc">Build API documentation with Doxygen and man pages</flag>
+    <flag name="seccomp">Enable seccomp syscall filtering for containers</flag>
+    <flag name="selinux">Enable SELinux MAC profile support</flag>
+  </use>
+  <upstream>
+    <remote-id type="github">lxc/lxc</remote-id>
+    <bugs-to>https://github.com/proxmox/lxc/issues</bugs-to>
+  </upstream>
+</pkgmetadata>

@@ -263,7 +263,7 @@ pve-http-server          pve-access-control
 | proxmox-acme ⚠️ | `dev-perl/libproxmox-acme-perl` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | libpve-notify-perl ⚠️ | `dev-perl/libpve-notify-perl` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-manager | `sys-apps/pve-manager` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
-| lxc-pve | `app-emulation/lxc-pve` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
+| lxc-pve | `app-emulation/lxc-pve` | 2 | ✅ | 🔧 | 🔲 | 🔲 |
 | lxcfs | `sys-fs/lxcfs` ✅ | 2 | — | ✅ | 🔲 | 🔲 |
 | pve-lxc-syscalld | `app-emulation/pve-lxc-syscalld` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-container | `app-emulation/pve-container` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |

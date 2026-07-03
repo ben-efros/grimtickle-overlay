@@ -56,7 +56,7 @@ Gentoo/Portage build environment.
 
 | Package doc | Portage atom | Status |
 |-------------|-------------|--------|
-| [lxc](packages/lxc.md) | `app-emulation/lxc-pve` | 🔲 ebuild needed |
+| [lxc](packages/lxc.md) | `app-emulation/lxc-pve` | ✅ ebuild written |
 | [lxcfs](packages/lxcfs.md) | `app-emulation/lxcfs` | 🔲 ebuild needed |
 | [pve-container](packages/pve-container.md) | `app-emulation/pve-container` | 🔲 ebuild needed |
 | [pve-lxc-syscalld](packages/pve-lxc-syscalld.md) | `app-emulation/pve-lxc-syscalld` | 🔲 ebuild needed |
