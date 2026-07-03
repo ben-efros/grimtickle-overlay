@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    The core Perl library shared by all pxvirt/Proxmox VE Perl components.
+    Provides the following key modules:
+
+      PVE::Tools          — misc utilities (run_command, lock_file, …)
+      PVE::JSONSchema     — schema validation and API parameter handling
+      PVE::INotify        — inotify-based config file monitoring
+      PVE::SectionConfig  — INI-style sectioned config file parser
+      PVE::RESTHandler    — REST API handler base class
+      PVE::RESTEnvironment — per-request context for REST handlers
+      PVE::CLIHandler     — CLI command dispatch
+      PVE::Network        — network interface configuration parsing
+      PVE::ProcFSTools    — /proc parsing helpers
+      PVE::CGroup         — cgroup v2 helpers
+      PVE::Daemon         — daemonisation helpers
+      PVE::Ticket         — API ticket (cookie) generation and validation
+      PVE::CalendarEvent  — calendar event / cron-like scheduling
+      PVE::OTP            — TOTP implementation
+      PVE::Certificate    — TLS certificate helpers
+      PVE::LDAP           — LDAP authentication
+      PVE::Systemd        — systemd unit management via D-Bus
+      PVE::Job::Registry  — scheduled job registry
+
+    All Perl dependencies are confirmed present in the Gentoo tree
+    (audited 2025-07-03). No XS or C compilation required.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-common.git</remote-id>
+    <remote-id type="github">jiangcuo/pve-common</remote-id>
+  </upstream>
+</pkgmetadata>
