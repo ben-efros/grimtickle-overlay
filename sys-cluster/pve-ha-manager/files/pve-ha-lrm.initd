@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# OpenRC init script for pve-ha-lrm (Local Resource Manager)
+# Part of Proxmox VE HA stack — runs on every cluster node.
+# TimeoutStopSec=infinity: LRM must wait for running VMs/CTs to migrate/stop.
+# We use a 5-minute cap; real migrations may take longer — adjust if needed.
+
+description="PVE Local HA Resource Manager"
+pidfile="/run/pve-ha-lrm.pid"
+command="/usr/sbin/pve-ha-lrm"
+command_args="start"
+stop_cmd="pve_ha_lrm_stop"
+
+depend() {
+	need pve-cluster
+	need watchdog-mux
+	need pvedaemon
+	after corosync
+	after pve-ha-crm
+	after pveproxy
+	after sshd
+}
+
+pve_ha_lrm_stop() {
+	# LRM stop is intentionally open-ended — it waits for active VM/CT
+	# operations to complete. Set PVEHА_STOP_TIMEOUT to override (seconds).
+	local timeout="${PVEHA_STOP_TIMEOUT:-300}"
+	/usr/sbin/pve-ha-lrm stop
+	local count=0
+	while [ -f "$pidfile" ] && [ $count -lt $timeout ]; do
+		sleep 1
+		count=$((count + 1))
+	done
+	# If still running after timeout, send SIGKILL
+	if [ -f "$pidfile" ]; then
+		ewarn "pve-ha-lrm did not stop cleanly within ${timeout}s — sending SIGKILL"
+		kill -9 "$(cat "$pidfile")" 2>/dev/null || true
+	fi
+}

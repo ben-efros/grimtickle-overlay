@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# OpenRC init script for pve-ha-crm (Cluster Resource Manager)
+# Part of Proxmox VE HA stack — only runs on cluster nodes with quorum.
+
+description="PVE Cluster HA Resource Manager"
+pidfile="/run/pve-ha-crm.pid"
+command="/usr/sbin/pve-ha-crm"
+command_args="start"
+stop_cmd="pve_ha_crm_stop"
+start_stop_daemon_args="--background --make-pidfile"
+
+depend() {
+	need pve-cluster
+	need watchdog-mux
+	after corosync
+	after pvedaemon
+}
+
+pve_ha_crm_stop() {
+	# CRM needs up to 65 seconds to shut down cleanly (matches TimeoutStopSec=65)
+	/usr/sbin/pve-ha-crm stop
+	local count=0
+	while [ -f "$pidfile" ] && [ $count -lt 65 ]; do
+		sleep 1
+		count=$((count + 1))
+	done
+}

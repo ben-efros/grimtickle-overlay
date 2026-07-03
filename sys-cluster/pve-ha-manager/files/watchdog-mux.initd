@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# OpenRC init script for watchdog-mux
+# Multiplexes /dev/watchdog so CRM and LRM can both pet the watchdog.
+# Must start before pve-ha-crm and pve-ha-lrm.
+#
+# IMPORTANT: /dev/watchdog is kept open for the full lifetime of this daemon
+# (by design — releasing it would allow other processes to grab it, silently
+# breaking HA watchdog protection).  See upstream comment in watchdog-mux.c.
+
+description="PVE watchdog multiplexer"
+command="/usr/sbin/watchdog-mux"
+pidfile="/run/watchdog-mux.pid"
+command_background="yes"
+start_stop_daemon_args="--make-pidfile"
+
+depend() {
+	before pve-ha-crm
+	before pve-ha-lrm
+}
+
+start_pre() {
+	# Warn if no hardware watchdog is present — softdog works as fallback
+	if [ ! -e /dev/watchdog ]; then
+		ewarn "/dev/watchdog not found — HA fencing may not work"
+		ewarn "Load a watchdog driver: modprobe softdog (or your hardware driver)"
+	fi
+}

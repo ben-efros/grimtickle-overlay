@@ -526,3 +526,19 @@ Full automation comes with `net-misc/pve-network-backend`.
 4. Users can inspect what PVE "thinks" the network is by reading one standard file
 
 **Full documentation**: `docs/networking/gentoo-networking.md`
+
+---
+
+## sys-cluster/pve-ha-manager (5.2.4)
+
+**Source**: Upstream proxmox.com 5.2.4 (NOT pxvirt 5.0.4). pxvirt has zero
+pxvirt-specific changes — it's just 2 minor versions behind upstream.
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| Based on upstream 5.2.4, not pxvirt 5.0.4 | BETTER | Adds disarm mode, watchdog safety, API improvements |
+| OpenRC init scripts for watchdog-mux, pve-ha-crm, pve-ha-lrm | DIFFERENT | Both OpenRC and systemd units installed |
+| LRM stop timeout: 300s default (systemd uses infinity) | DIFFERENT | Override via PVEHA_STOP_TIMEOUT in /etc/conf.d/pve-ha-lrm |
+| USE=simulator gates Gtk3 HA simulator install | DIFFERENT | Optional; Debian always installs pve-ha-simulator |
+| CONFIG_CHECK for CONFIG_WATCHDOG | TRANSPARENT | softdog module works if no hardware watchdog |
+| HA is optional — pvedaemon starts without it | TRANSPARENT | Install only on multi-node HA clusters |

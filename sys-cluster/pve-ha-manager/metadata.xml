@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="simulator">Install pve-ha-simulator (Gtk3 GUI for HA testing — requires display)</flag>
+  </use>
+  <longdescription>
+    Proxmox VE High Availability Manager. Provides watchdog-mux (C daemon that
+    multiplexes /dev/watchdog), pve-ha-crm (Cluster Resource Manager — one
+    elected master per cluster), pve-ha-lrm (Local Resource Manager — one per
+    node), ha-manager CLI, REST API endpoints (/nodes/{n}/ha/*), and HA
+    notification templates.
+
+    Source: upstream proxmox.com 5.2.4. pxvirt 5.0.4 has no pxvirt-specific
+    changes — just 2 minor versions behind. Upstream adds: disarm mode (graceful
+    maintenance without fencing), watchdog safety improvements, updated service
+    config API, and syslog-compatible log levels.
+
+    HA is OPTIONAL — pvedaemon runs on single nodes without it. Install only
+    on multi-node cluster nodes where VM failover is required.
+
+    CONFIG_CHECK: requires CONFIG_WATCHDOG in kernel. softdog module works if
+    no hardware watchdog is present.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-ha-manager.git</remote-id>
+  </upstream>
+</pkgmetadata>
