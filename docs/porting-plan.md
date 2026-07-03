@@ -17,6 +17,55 @@ Debian, dpkg, or apt involvement.
 
 ---
 
+## Critical Path
+
+> ⚠️ These packages block everything. Build them first.
+
+```
+dev-lang/rust (≥ 1.75)
+    └── dev-perl/libproxmox-rs-perl   ← BLOCKS ALL PVE PERL PACKAGES
+            └── dev-perl/libpve-common-perl   ← BLOCKS ENTIRE MANAGEMENT STACK
+```
+
+See [dependency-implications.md](dependency-implications.md) for the full breakdown of
+what breaks when each package is absent.
+
+---
+
+## Gentoo Tree Audit Results
+
+Before writing overlay ebuilds, these packages were confirmed **already in the Gentoo
+main tree** and do NOT need overlay ebuilds (unless pxvirt patches are required):
+
+| Package | Gentoo atom | Notes |
+|---------|-------------|-------|
+| libqb | `sys-cluster/libqb` ✅ | v2.0.8+ |
+| kronosnet | `sys-cluster/kronosnet` ✅ | v1.19+ |
+| corosync | `sys-cluster/corosync` ✅ | v3.1.0 — **must verify ABI with pve-cluster patches** |
+| frr | `net-misc/frr` ✅ | v10.x — for BGP/EVPN SDN |
+| swtpm | `app-crypt/swtpm` ✅ | v0.10.0 — vTPM support |
+| libtpms | `dev-libs/libtpms` ✅ | v0.10.x |
+| lxcfs | `sys-fs/lxcfs` ✅ | v6.x — **note: sys-fs/ not app-emulation/** |
+| pixman | `x11-libs/pixman` ✅ | |
+| libgit2 | `dev-libs/libgit2` ✅ | |
+| libseccomp | `sys-libs/libseccomp` ✅ | |
+| postfix | `mail-mta/postfix` ✅ | satisfies mail-transport-agent dep |
+| edk2-bin | `sys-firmware/edk2-bin` ✅ | x86 **only** — need pve-edk2-firmware for ARM64/loong |
+
+**Not in Gentoo tree — overlay ebuilds required:**
+
+| Package | Notes |
+|---------|-------|
+| `app-emulation/lxc-pve` | No conflict — `app-emulation/lxc` does not exist in tree |
+| `app-emulation/spiceterm` | Not in tree |
+| `sys-apps/proxmox-mini-journalreader` | Not in tree; hard dep of pve-manager |
+| `sys-apps/proxmox-mail-forward` | Not in tree; hard dep of pve-manager |
+| `sys-apps/proxmox-rrd-migration-tool` | Not in tree; hard dep of pve-manager |
+| `www-apps/libjs-qrcodejs` | Not in tree; hard dep of pve-manager |
+| `sys-firmware/pve-edk2-firmware` | ARM64/LoongArch UEFI blobs; edk2-bin is x86-only |
+
+---
+
 ## Phases at a Glance
 
 | Phase | Name | Key packages | Outcome |
@@ -85,6 +134,11 @@ pve-http-server          pve-access-control
 | `novnc-pve` | `www-apps/novnc-pve` | Static assets | noVNC web console |
 | `pve-xtermjs` | `www-apps/pve-xtermjs` | Node.js build | xterm.js terminal |
 | `vncterm` | `app-emulation/vncterm` | CMake | VNC terminal emulator |
+| `libjs-qrcodejs` | `www-apps/libjs-qrcodejs` | Static assets | QR codes for TOTP; **hard dep of pve-manager** |
+| `proxmox-mini-journalreader` | `sys-apps/proxmox-mini-journalreader` | C/Rust | Task log viewer; **hard dep of pve-manager** |
+| `proxmox-mail-forward` | `sys-apps/proxmox-mail-forward` | Shell/Perl | Mail relay; **hard dep of pve-manager** |
+| `proxmox-rrd-migration-tool` | `sys-apps/proxmox-rrd-migration-tool` | Rust | RRD stats tool; **hard dep of pve-manager** |
+| `pve-edk2-firmware` | `sys-firmware/pve-edk2-firmware` | EDK2 cross-build | ARM64+LoongArch UEFI; **ARM64 VMs unusable without this** |
 | `pve-manager` | `sys-apps/pve-manager` | Makefile + Perl | Top-level daemon + web UI |
 
 ### Phase 1 system dependencies (from main Gentoo tree)
@@ -120,8 +174,8 @@ pve-http-server          pve-access-control
 
 | pxvirt package | Portage atom | Notes |
 |----------------|-------------|-------|
-| `lxc` | `app-emulation/lxc-pve` | pxvirt-patched LXC; replaces `app-emulation/lxc` |
-| `lxcfs` | `app-emulation/lxcfs` | Likely already in Gentoo tree; check version |
+| `lxc` | `app-emulation/lxc-pve` | pxvirt-patched LXC; **no conflict** — `app-emulation/lxc` does not exist in Gentoo tree |
+| `lxcfs` | `sys-fs/lxcfs` ✅ | **Already in Gentoo tree** as `sys-fs/lxcfs` (not app-emulation/) |
 | `pve-lxc-syscalld` | `app-emulation/pve-lxc-syscalld` | Rust daemon for LXC syscall handling |
 | `pve-container` | `app-emulation/pve-container` | Perl CT management (pct) |
 
@@ -143,17 +197,18 @@ pve-http-server          pve-access-control
 
 | pxvirt package | Portage atom | Notes |
 |----------------|-------------|-------|
-| `kronosnet` | `sys-cluster/kronosnet` | Corosync transport; check Gentoo tree |
-| `libqb` | `sys-libs/libqb` | IPC library for corosync; check Gentoo tree |
-| `corosync-pve` | `sys-cluster/corosync-pve` | pxvirt-patched corosync |
+| `kronosnet` | `sys-cluster/kronosnet` ✅ | **Already in Gentoo tree** (v1.19+) |
+| `libqb` | `sys-cluster/libqb` ✅ | **Already in Gentoo tree** (v2.0.8+) |
+| `corosync-pve` | `sys-cluster/corosync-pve` | Gentoo tree has upstream corosync-3.1.0; **must verify ABI compatibility with pve-cluster before deciding if overlay ebuild is needed** |
 | `pve-cluster` | `sys-cluster/pve-cluster` | pmxcfs cluster filesystem + Perl libs |
 | `pve-ha-manager` | `sys-cluster/pve-ha-manager` | HA resource management |
 
 ### Notes
-- `kronosnet` and `libqb` may already exist in the Gentoo main tree; check before writing
-  overlay ebuilds. Only add overlay versions if patches are required.
+- `kronosnet` and `libqb` are confirmed in the Gentoo tree — no overlay ebuilds needed.
+- `corosync`: upstream `sys-cluster/corosync-3.1.0` is in tree. **Before writing a corosync-pve overlay ebuild, attempt to link pve-cluster against it.** If it succeeds, skip the overlay ebuild and use the tree package.
 - `pve-cluster` installs `pmxcfs` (a FUSE-based cluster filesystem using Corosync).
 - Cluster requires an odd number of nodes (or a QDevice) for quorum.
+- On a standalone node, see [single-node-bootstrap.md](single-node-bootstrap.md) to run pve-manager without pve-cluster.
 
 ---
 
@@ -195,22 +250,32 @@ pve-http-server          pve-access-control
 | pve-network | `net-misc/libpve-network-perl` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-qemu | `app-emulation/pve-qemu-kvm` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | qemu-server | `app-emulation/qemu-server` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| pve-edk2-firmware ⚠️ | `sys-firmware/pve-edk2-firmware` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | extjs | `www-apps/libjs-extjs` | 1 | 🔲 | 🔲 | ✅ | ✅ |
 | proxmox-widget-toolkit | `www-apps/proxmox-widget-toolkit` | 1 | 🔲 | 🔲 | ✅ | ✅ |
 | novnc-pve | `www-apps/novnc-pve` | 1 | 🔲 | 🔲 | ✅ | ✅ |
 | pve-xtermjs | `www-apps/pve-xtermjs` | 1 | 🔲 | 🔲 | ✅ | ✅ |
 | vncterm | `app-emulation/vncterm` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| libjs-qrcodejs ⚠️ | `www-apps/libjs-qrcodejs` | 1 | 🔲 | 🔲 | ✅ | ✅ |
+| proxmox-mini-journalreader ⚠️ | `sys-apps/proxmox-mini-journalreader` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| proxmox-mail-forward ⚠️ | `sys-apps/proxmox-mail-forward` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| proxmox-rrd-migration-tool ⚠️ | `sys-apps/proxmox-rrd-migration-tool` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| proxmox-acme ⚠️ | `dev-perl/libproxmox-acme-perl` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
+| libpve-notify-perl ⚠️ | `dev-perl/libpve-notify-perl` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-manager | `sys-apps/pve-manager` | 1 | 🔲 | 🔲 | 🔲 | 🔲 |
 | lxc-pve | `app-emulation/lxc-pve` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
-| lxcfs | `app-emulation/lxcfs` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
+| lxcfs | `sys-fs/lxcfs` ✅ | 2 | — | ✅ | 🔲 | 🔲 |
 | pve-lxc-syscalld | `app-emulation/pve-lxc-syscalld` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-container | `app-emulation/pve-container` | 2 | 🔲 | 🔲 | 🔲 | 🔲 |
-| corosync-pve | `sys-cluster/corosync-pve` | 3 | 🔲 | 🔲 | 🔲 | 🔲 |
+| kronosnet | `sys-cluster/kronosnet` ✅ | 3 | — | ✅ | 🔲 | 🔲 |
+| libqb | `sys-cluster/libqb` ✅ | 3 | — | ✅ | 🔲 | 🔲 |
+| corosync-pve | `sys-cluster/corosync-pve` (or tree) | 3 | ❓ | ❓ | 🔲 | 🔲 |
 | pve-cluster | `sys-cluster/pve-cluster` | 3 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-ha-manager | `sys-cluster/pve-ha-manager` | 3 | 🔲 | 🔲 | 🔲 | 🔲 |
 | pve-firewall | `net-firewall/pve-firewall` | 4 | 🔲 | 🔲 | 🔲 | 🔲 |
-| proxmox-acme | `dev-perl/libproxmox-acme-perl` | 4 | 🔲 | 🔲 | 🔲 | 🔲 |
 | proxmox-backup | `app-backup/proxmox-backup` | 4 | 🔲 | 🔲 | 🔲 | 🔲 |
 | ceph | `sys-cluster/ceph` ✅ | 4 | ✅ | 🔧 | 🔲 | 🔲 |
 
-Legend: ✅ done · 🔧 in progress · 🔲 not started
+Legend: ✅ done · 🔧 in progress · 🔲 not started · — not applicable (from Gentoo tree) · ❓ TBD (ABI check needed)
+
+⚠️ = **Hard dependency of pve-manager** — must be built before `emerge sys-apps/pve-manager` will succeed.

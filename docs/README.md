@@ -20,9 +20,11 @@ Gentoo/Portage build environment.
 | File | Description |
 |------|-------------|
 | [overview.md](overview.md) | What pxvirt is, why Gentoo, overlay architecture |
-| [porting-plan.md](porting-plan.md) | Phased porting roadmap and package status table |
+| [porting-plan.md](porting-plan.md) | Phased porting roadmap, Gentoo tree audit results, package status table |
 | [networking.md](networking.md) | VM bridge setup for systemd-networkd and NetworkManager |
 | [build-guide.md](build-guide.md) | Overlay setup, USE flags, emerge commands, keyword unmasking |
+| [dependency-implications.md](dependency-implications.md) | **What breaks if a package is missing** — severity ratings and workarounds |
+| [single-node-bootstrap.md](single-node-bootstrap.md) | **Running pve-manager without pve-cluster** on a standalone node |
 | [packages/README.md](packages/README.md) | Full dependency table and portage category assignments |
 
 ---
@@ -47,6 +49,8 @@ Gentoo/Portage build environment.
 | [novnc-pve](packages/novnc-pve.md) | `www-apps/novnc-pve` | 🔲 ebuild needed |
 | [pve-xtermjs](packages/pve-xtermjs.md) | `www-apps/pve-xtermjs` | 🔲 ebuild needed |
 | [vncterm](packages/vncterm.md) | `app-emulation/vncterm` | 🔲 ebuild needed |
+| [pve-edk2-firmware](packages/pve-edk2-firmware.md) | `sys-firmware/pve-edk2-firmware` | 🔲 ebuild needed |
+| [missing-small-packages](packages/missing-small-packages.md) | mini-journalreader, mail-forward, rrd-tool, qrcodejs, spiceterm | 🔲 ebuilds needed |
 
 ### Phase 2 — LXC Containers
 
