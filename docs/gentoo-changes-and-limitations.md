@@ -418,3 +418,27 @@ Required by `PVE::Storage::PBSPlugin` — without it `PVE::Storage` fails to loa
 | `libpve-cluster-perl` not yet ported | DEGRADED | `ReplicationConfig`/`ReplicationState`/`AbstractConfig` cluster reads fail on single-node; non-replicated local VMs/CTs unaffected |
 | All CPAN deps in tree | TRANSPARENT | JSON, URI, Time::HiRes, IPC::Open2 (core) |
 | Sourced from upstream proxmox.com git (no pxvirt fork) | TRANSPARENT | No pxvirt-specific patches in pve-guest-common |
+
+---
+
+## dev-libs/marked-js (9.1.6)
+
+**Purpose:** Markdown parser JavaScript library bundled into proxmoxlib.js at build time.
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| Not in ::gentoo as `dev-libs/marked-js` | TRANSPARENT | Added to overlay; sourced from npm registry tarball |
+| Version 9.1.6 vs Debian bookworm 4.x / trixie ~14.x | TRANSPARENT | Any modern marked version works; only concatenated into proxmoxlib.js for UI markdown rendering (task notes, etc.) |
+
+---
+
+## www-apps/proxmox-widget-toolkit (4.3.10)
+
+**Purpose:** ExtJS widget components bundled as proxmoxlib.js; required by pve-manager web UI.
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| Built at emerge time (not pre-built) | TRANSPARENT | Uses `dev-util/uglifyjs` + `dev-lang/sassc` (both in ::gentoo) to build proxmoxlib.{js,min.js} and compile SCSS dark theme |
+| `node/APT.js` / `node/APTRepositories.js` installed but non-functional | DIFFERENT | JS APT panel renders empty; matches the Perl APT stub in proxmox-perl-rs. No apt backend on Gentoo — APT repository manager tab shows nothing |
+| `pve-eslint` linting skipped | TRANSPARENT | Only needed for CI/quality checks, not for the installed artifact |
+| Markdown rendering uses marked 9.1.6 | TRANSPARENT | Bundled into proxmoxlib.js; affects task notes / UI markdown views |

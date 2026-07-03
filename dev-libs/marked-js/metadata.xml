@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Marked is a fast, low-level Markdown compiler for JavaScript. This
+    package installs marked.js to /usr/share/javascript/marked/marked.js
+    which is the path expected by proxmox-widget-toolkit's build system
+    when bundling proxmoxlib.js.
+  </longdescription>
+  <upstream>
+    <remote-id type="npm">marked</remote-id>
+    <remote-id type="github">markedjs/marked</remote-id>
+  </upstream>
+</pkgmetadata>

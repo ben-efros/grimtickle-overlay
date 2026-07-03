@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <longdescription>
+    Core widgets, models, and utilities for all Proxmox ExtJS-based web UIs.
+    Provides proxmoxlib.js (and .min.js) — the bundled JS library loaded by
+    pve-manager, proxmox-backup, and other Proxmox web interfaces.
+
+    Build process at emerge time:
+      - Concatenates ~80 JS source files + marked.js → proxmoxlib.js
+      - Minifies with uglifyjs → proxmoxlib.min.js
+      - Compiles SCSS dark theme with sassc → theme-proxmox-dark.css
+
+    Installed to /usr/share/javascript/proxmox-widget-toolkit/
+
+    Note: node/APT.js and node/APTRepositories.js are installed but will
+    render empty on Gentoo (no apt backend). This matches the APT stub
+    applied to the Perl layer in proxmox-perl-rs.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">jiangcuo/proxmox-widget-toolkit</remote-id>
+  </upstream>
+</pkgmetadata>
