@@ -468,3 +468,23 @@ HA auto-rebalance, dynamic CRS mode) were already merged into upstream 9.1.6. On
 | Single-node mode: pmxcfs runs without corosync | TRANSPARENT | Local mode; /etc/pve/ served from SQLite without replication |
 | FUSE kernel module required | TRANSPARENT | CONFIG_FUSE_FS; checked via linux-info |
 | sysctl 10-pve-cluster.conf installed | TRANSPARENT | bridge-nf bypass + aio-max-nr; needed for VMs/containers |
+
+---
+
+## dev-perl/libpve-network-perl (1.1.8)
+
+**Source**: Upstream proxmox.com 1.1.8 — identical to pxvirt. No patches needed.
+
+| Change | Severity | Notes |
+|--------|----------|-------|
+| `USE=faucet` gates FaucetPlugin install | LOW | Faucet OpenFlow SDN controller is rare; use USE=faucet to enable |
+| **ifupdown2 not available on Gentoo** | HIGH | SDN `ifreload -a` call will fail; `net-misc/pve-network-backend` shim needed |
+| **Host bridge (/etc/network/interfaces)** | HIGH | Written by PVE::INotify; nothing applies it without shim; manual vmbr0 setup for Phase 1 |
+| SDN config written to `/etc/network/interfaces.d/sdn` | HIGH | File written correctly; not applied without shim |
+| dnsmasq drop-in installed unconditionally | LOW | OpenRC dnsmasq ignores systemd drop-ins; harmless |
+| Faucet SDN plugin removed by default | DIFFERENT | `CPAN::Meta::YAML` dep avoided; opt-in with USE=faucet |
+
+**Phase 1 workaround for host bridge**: manually create vmbr0 before starting pvedaemon.
+With systemd-networkd, drop a `.network` + `.netdev` file and `networkctl reload`.
+With netifrc, set `bridge_vmbr0` in `/etc/conf.d/net` and start `net.vmbr0`.
+Full automation comes with `net-misc/pve-network-backend`.

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="project">
+    <email>overlay@grimtickle.local</email>
+    <name>grimtickle-overlay</name>
+  </maintainer>
+  <use>
+    <flag name="faucet">Install FaucetPlugin (OpenFlow SDN controller support — rarely used)</flag>
+  </use>
+  <longdescription>
+    Proxmox VE SDN (Software-Defined Networking) Perl library. Manages overlay
+    networks (VLAN, VxLAN, EVPN/BGP, QinQ, WireGuard fabrics) and IPAM.
+
+    This package provides the SDN configuration layer only. It generates
+    /etc/network/interfaces.d/sdn snippets. Applying those snippets to the
+    host requires either ifupdown2 (Debian) or the Gentoo network backend
+    plugin (net-misc/pve-network-backend). See docs/packages/pve-network-moddoc.md.
+
+    Host bridge management (vmbr0 etc.) is in libpve-common-perl, not here.
+  </longdescription>
+  <upstream>
+    <remote-id type="git">https://git.proxmox.com/?p=pve-network.git</remote-id>
+  </upstream>
+</pkgmetadata>
