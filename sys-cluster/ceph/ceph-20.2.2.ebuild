@@ -30,7 +30,7 @@ IUSE="
 	babeltrace +cephfs custom-cflags diskprediction dpdk fuse grafana jaeger
 	kafka kerberos ldap lttng +mgr nvmeof +parquet pmdk rabbitmq +radosgw
 	rbd-rwl rbd-ssd rdma rgw-lua selinux +ssl spdk +sqlite +system-boost
-	systemd +tcmalloc test +uring xfs zbd
+	systemd +tcmalloc test uadk +uring xfs zbd
 "
 
 CPU_FLAGS_X86=(avx2 avx512f pclmul sse{,2,3,4_1,4_2} ssse3)
@@ -81,7 +81,7 @@ DEPEND="
 	dev-cpp/yaml-cpp:=
 	dev-python/natsort[${PYTHON_USEDEP}]
 	dev-python/pyyaml[${PYTHON_USEDEP}]
-	dev-vcs/git
+	uadk? ( dev-vcs/git )
 	net-dns/c-ares:=
 	net-libs/gnutls:=
 	sys-auth/oath-toolkit:=
@@ -329,6 +329,7 @@ ceph_src_configure() {
 		-DWITH_LIBCEPHSQLITE:BOOL=$(usex sqlite)
 		-DWITH_XFS:BOOL=$(usex xfs)
 		-DWITH_ZBD:BOOL=$(usex zbd)
+		-DWITH_UADK:BOOL=$(usex uadk)
 		-DENABLE_SHARED:BOOL=ON
 		-DALLOCATOR:STRING=$(usex tcmalloc tcmalloc libc)
 		-DWITH_SYSTEM_PMDK:BOOL=$(usex pmdk 'YES' "$(usex rbd-rwl '')")
