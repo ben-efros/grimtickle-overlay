@@ -1,0 +1,17 @@
+--- efitools-1.9.2/Make.rules
++++ efitools-1.9.2/Make.rules
+@@ -46,12 +46,12 @@
+ 
+ ifeq ($(ARCH),arm)
+   LIBS += --defsym=EFI_SUBSYSTEM=0x0a
+-  FORMAT = -O binary
++  FORMAT = -O efi-app-arm
+ endif
+ 
+ ifeq ($(ARCH),aarch64)
+   LIBS += --defsym=EFI_SUBSYSTEM=0x0a
+-  FORMAT = -O binary
++  FORMAT = -O efi-app-aarch64
+ endif
+ 
+ %.efi: %.so
