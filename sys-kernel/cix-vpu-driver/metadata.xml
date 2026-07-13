@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <longdescription>
+    Out-of-tree Linux kernel driver for the ArmChina Linlon VPU found in
+    the CIX SKY1 SoC. Provides the amvx.ko V4L2 codec module and installs
+    the mvx-v4l2-controls.h UAPI header for userspace consumers.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">cixtech/cix_opensource__vpu_driver</remote-id>
+  </upstream>
+</pkgmetadata>
