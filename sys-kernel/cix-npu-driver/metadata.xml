@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <longdescription>
+    Out-of-tree Linux kernel driver for the ArmChina Zhouyi NPU found in
+    the CIX SKY1 SoC. Provides the aipu.ko module for Zhouyi V3 hardware
+    and installs the armchina_aipu.h UAPI header for userspace consumers.
+  </longdescription>
+  <upstream>
+    <remote-id type="github">cixtech/cix_opensource__npu_driver</remote-id>
+  </upstream>
+</pkgmetadata>
