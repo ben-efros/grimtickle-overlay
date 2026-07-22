@@ -1,0 +1,47 @@
+diff --git a/drivers/spi/spi-cadence.c b/drivers/spi/spi-cadence.c
+index 891e2ba..815c56b 100644
+--- a/drivers/spi/spi-cadence.c
++++ b/drivers/spi/spi-cadence.c
+@@ -20,6 +20,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/reset.h>
+ #include <linux/spi/spi.h>
++#include <linux/acpi.h>//
+ 
+ /* Name of this driver */
+ #define CDNS_SPI_NAME		"cdns-spi"
+@@ -730,7 +731,8 @@ static int cdns_spi_probe(struct platform_device *pdev)
+ 	ctlr->bits_per_word_mask = SPI_BPW_MASK(8);
+ 	ctlr->flags = SPI_CONTROLLER_MUST_TX;
+ 
+-	if (of_device_is_compatible(pdev->dev.of_node, "cix,sky1-spi-r1p6"))
++	if (of_device_is_compatible(pdev->dev.of_node, "cix,sky1-spi-r1p6") ||
++	    acpi_dev_hid_uid_match(ACPI_COMPANION(&pdev->dev), "CIXH2001", NULL))
+ 		ctlr->bits_per_word_mask |= SPI_BPW_MASK(16) | SPI_BPW_MASK(32);
+ 
+ 	if (!spi_controller_is_target(ctlr)) {
+@@ -897,6 +899,16 @@ static const struct of_device_id cdns_spi_of_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, cdns_spi_of_match);
+ 
++#ifdef CONFIG_ACPI
++static const struct acpi_device_id cdns_spi_acpi_match[] = {
++       { "CIXH2001", 0 },
++       { }
++};
++MODULE_DEVICE_TABLE(acpi, cdns_spi_acpi_match);
++#endif
++
++
++
+ /* cdns_spi_driver - This structure defines the SPI subsystem platform driver */
+ static struct platform_driver cdns_spi_driver = {
+ 	.probe	= cdns_spi_probe,
+@@ -904,6 +916,7 @@ static struct platform_driver cdns_spi_driver = {
+ 	.driver = {
+ 		.name = CDNS_SPI_NAME,
+ 		.of_match_table = cdns_spi_of_match,
++		.acpi_match_table = ACPI_PTR(cdns_spi_acpi_match),
+ 		.pm = &cdns_spi_dev_pm_ops,
+ 	},
+ };
