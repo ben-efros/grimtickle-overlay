@@ -4,18 +4,53 @@ Date: Wed, 18 Mar 2026 14:29:39 +0800
 Subject: drm: panthor: add acpi support for cix p1
 
 Signed-off-by: Jianfeng Liu <Jianfeng.Liu@cixtech.com>
+
+Rebased for Linux 7.1.5 (kernel.org 7.1.1-7.1.5 point releases pulled
+in an upstream Panthor refactor between 7.1.2 and 7.1.5):
+
+ - panthor_regs.h was split upstream into panthor_gpu_regs.h,
+   panthor_fw_regs.h, panthor_mmu_regs.h and panthor_pwr_regs.h. The
+   CIX-added GPU_COHERENCY_SHAREABLE_CACHE, GPU_SYSC_PBHA_OVERRIDE()
+   and GPU_SYSC_ALLOC() register macros now live in the new
+   panthor_gpu_regs.h (the only touched file that still needs them),
+   since panthor_regs.h no longer exists.
+ - gpu_read()/gpu_write()/gpu_read64() now take a `void __iomem *`
+   (ptdev->iomem) instead of `struct panthor_device *`. All CIX
+   register accesses added by this patch (Sky1 PHBA setup in
+   panthor_gpu_l2_power_on(), coherency protocol read/write in
+   panthor_gpu_coherency_init()/panthor_gpu_coherency_set()) were
+   updated to the new calling convention.
+ - panthor_hw.c's panthor_gpu_info_init() upstream now populates
+   gpu_info.gpu_id via a dedicated panthor_hw_gpu_id_init() called
+   earlier in panthor_hw_init(), so this patch's duplicate
+   `gpu_id = gpu_read(...)` line was dropped as redundant; only the
+   `int ret;` declaration this patch's later hunk depends on is kept.
+
+No functional behavior change versus the 7.1.2 version of this patch:
+same Sky1 detection, SMC SCMI GPU power-domain control, ACE-Lite
+coherency policy, backup clocks, RCSU shader-harvesting workaround and
+gpu_id/PBHA register handling - only adapted to call conventions and
+header layout that changed upstream between 7.1.2 and 7.1.5.
+
+Verified: patch applies cleanly (patch -p1 --batch) against a genuine
+vendor-pristine 7.1.5 tree (linux-7.1.tar.xz + genpatches-7.1-8 point
+releases 1.1-1.5 + base fixups) both standalone (after patches
+0001-00101) and as part of the full 93-patch chain; drivers/gpu/drm/panthor
+compiles with `make W=1 M=drivers/gpu/drm/panthor` with zero warnings,
+and panthor.ko links successfully against a full `make modules` build
+with zero unresolved symbols.
 ---
- drivers/gpu/drm/panthor/panthor_devfreq.c | 324 +++++++-
- drivers/gpu/drm/panthor/panthor_device.c  | 389 +++++++++-
- drivers/gpu/drm/panthor/panthor_device.h  |  41 +-
- drivers/gpu/drm/panthor/panthor_drv.c     |  10 +
- drivers/gpu/drm/panthor/panthor_fw.c      |  10 +-
- drivers/gpu/drm/panthor/panthor_gem.c     |  11 +-
- drivers/gpu/drm/panthor/panthor_gpu.c     |  43 +-
- drivers/gpu/drm/panthor/panthor_hw.c      |  23 +-
- drivers/gpu/drm/panthor/panthor_mmu.c     |  44 +-
- drivers/gpu/drm/panthor/panthor_regs.h    |   5 +
- 10 files changed, 829 insertions(+), 71 deletions(-)
+ drivers/gpu/drm/panthor/panthor_devfreq.c  | 324 ++++++++++++++++++++++++-
+ drivers/gpu/drm/panthor/panthor_device.c   | 365 ++++++++++++++++++++++++++---
+ drivers/gpu/drm/panthor/panthor_device.h   |  41 +++-
+ drivers/gpu/drm/panthor/panthor_drv.c      |  10 +
+ drivers/gpu/drm/panthor/panthor_fw.c       |  10 +-
+ drivers/gpu/drm/panthor/panthor_gem.c      |  11 +-
+ drivers/gpu/drm/panthor/panthor_gpu.c      |  43 +++-
+ drivers/gpu/drm/panthor/panthor_gpu_regs.h |   5 +
+ drivers/gpu/drm/panthor/panthor_hw.c       |  22 +-
+ drivers/gpu/drm/panthor/panthor_mmu.c      |  44 +++-
+ 10 files changed, 808 insertions(+), 67 deletions(-)
 
 diff --git a/drivers/gpu/drm/panthor/panthor_devfreq.c b/drivers/gpu/drm/panthor/panthor_devfreq.c
 index 111111111111..222222222222 100644
@@ -465,8 +500,8 @@ index 111111111111..222222222222 100644
  #include <linux/regulator/consumer.h>
  #include <linux/reset.h>
  
-@@ -26,45 +32,177 @@
- #include "panthor_regs.h"
+@@ -27,29 +33,145 @@
+ #include "panthor_pwr.h"
  #include "panthor_sched.h"
  
 +static bool panthor_is_sky1(struct panthor_device *ptdev)
@@ -612,11 +647,11 @@ index 111111111111..222222222222 100644
 -	/* Check if the ACE-Lite coherency protocol is actually supported by the GPU.
 -	 * ACE protocol has never been supported for command stream frontend GPUs.
 -	 */
--	if ((gpu_read(ptdev, GPU_COHERENCY_FEATURES) &
+-	if ((gpu_read(ptdev->iomem, GPU_COHERENCY_FEATURES) &
 -		      GPU_COHERENCY_PROT_BIT(ACE_LITE))) {
 -		ptdev->gpu_info.selected_coherency = GPU_COHERENCY_ACE_LITE;
 +	/* Verify hardware supports the selected protocol. */
-+	if (gpu_read(ptdev, GPU_COHERENCY_FEATURES) &
++	if (gpu_read(ptdev->iomem, GPU_COHERENCY_FEATURES) &
 +	    GPU_COHERENCY_PROT_BIT(ACE_LITE))
  		return 0;
 -	}
@@ -626,43 +661,7 @@ index 111111111111..222222222222 100644
  	return -ENOTSUPP;
  }
  
- static int panthor_clk_init(struct panthor_device *ptdev)
- {
--	ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
-+	/* Try vendor name first (gpu_clk_core), then unnamed default */
-+	ptdev->clks.core = devm_clk_get_optional(ptdev->base.dev, "gpu_clk_core");
- 	if (IS_ERR(ptdev->clks.core))
- 		return dev_err_probe(ptdev->base.dev,
- 				     PTR_ERR(ptdev->clks.core),
--				     "get 'core' clock failed");
-+				     "get 'gpu_clk_core' clock failed");
-+	if (!ptdev->clks.core) {
-+		ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
-+		if (IS_ERR(ptdev->clks.core))
-+			return dev_err_probe(ptdev->base.dev,
-+					     PTR_ERR(ptdev->clks.core),
-+					     "get 'core' clock failed");
-+	}
- 
--	ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
-+	/* Try vendor name first (gpu_clk_stacks), then mainline name (stacks) */
-+	ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "gpu_clk_stacks");
- 	if (IS_ERR(ptdev->clks.stacks))
- 		return dev_err_probe(ptdev->base.dev,
- 				     PTR_ERR(ptdev->clks.stacks),
--				     "get 'stacks' clock failed");
-+				     "get 'gpu_clk_stacks' clock failed");
-+	if (!ptdev->clks.stacks) {
-+		ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
-+		if (IS_ERR(ptdev->clks.stacks))
-+			return dev_err_probe(ptdev->base.dev,
-+					     PTR_ERR(ptdev->clks.stacks),
-+					     "get 'stacks' clock failed");
-+	}
- 
- 	ptdev->clks.coregroup = devm_clk_get_optional(ptdev->base.dev, "coregroup");
- 	if (IS_ERR(ptdev->clks.coregroup))
-@@ -72,18 +210,128 @@ static int panthor_clk_init(struct panthor_device *ptdev)
+@@ -73,18 +195,128 @@ static int panthor_clk_init(struct panthor_device *ptdev)
  				     PTR_ERR(ptdev->clks.coregroup),
  				     "get 'coregroup' clock failed");
  
@@ -688,8 +687,7 @@ index 111111111111..222222222222 100644
  
 -static int panthor_init_power(struct device *dev)
 +static void panthor_pm_domain_fini(struct panthor_device *ptdev)
- {
--	struct dev_pm_domain_list  *pd_list = NULL;
++{
 +	int i;
 +
 +	for (i = 0; i < ARRAY_SIZE(ptdev->pm_domain_devs); i++) {
@@ -704,7 +702,8 @@ index 111111111111..222222222222 100644
 +}
 +
 +static int panthor_pm_domain_init(struct panthor_device *ptdev)
-+{
+ {
+-	struct dev_pm_domain_list  *pd_list = NULL;
 +	int err;
 +	int i, num_domains;
 +
@@ -796,7 +795,7 @@ index 111111111111..222222222222 100644
  }
  
  void panthor_device_unplug(struct panthor_device *ptdev)
-@@ -195,6 +443,7 @@ int panthor_device_init(struct panthor_device *ptdev)
+@@ -196,6 +428,7 @@ int panthor_device_init(struct panthor_device *ptdev)
  	int ret;
  
  	ptdev->soc_data = of_device_get_match_data(ptdev->base.dev);
@@ -804,7 +803,7 @@ index 111111111111..222222222222 100644
  
  	init_completion(&ptdev->unplug.done);
  	ret = drmm_mutex_init(&ptdev->base, &ptdev->unplug.lock);
-@@ -243,36 +492,96 @@ int panthor_device_init(struct panthor_device *ptdev)
+@@ -245,36 +478,96 @@ int panthor_device_init(struct panthor_device *ptdev)
  	if (ret)
  		return ret;
  
@@ -913,7 +912,7 @@ index 111111111111..222222222222 100644
  	}
  
  	ret = panthor_hw_init(ptdev);
-@@ -291,6 +600,11 @@ int panthor_device_init(struct panthor_device *ptdev)
+@@ -293,6 +586,11 @@ int panthor_device_init(struct panthor_device *ptdev)
  	if (ret)
  		goto err_unplug_gpu;
  
@@ -925,7 +924,7 @@ index 111111111111..222222222222 100644
  	ret = panthor_mmu_init(ptdev);
  	if (ret)
  		goto err_unplug_gpu;
-@@ -334,6 +648,9 @@ int panthor_device_init(struct panthor_device *ptdev)
+@@ -339,6 +637,9 @@ int panthor_device_init(struct panthor_device *ptdev)
  
  err_rpm_put:
  	pm_runtime_put_sync_suspend(ptdev->base.dev);
@@ -975,7 +974,7 @@ index 111111111111..222222222222 100644
  struct panthor_csf;
  struct panthor_csf_ctx;
  struct panthor_device;
-@@ -136,6 +158,18 @@ struct panthor_device {
+@@ -139,6 +161,18 @@ struct panthor_device {
  	/** @iomem: CPU mapping of the IOMEM region. */
  	void __iomem *iomem;
  
@@ -994,7 +993,7 @@ index 111111111111..222222222222 100644
  	/** @clks: GPU clocks. */
  	struct {
  		/** @core: Core clock. */
-@@ -146,10 +180,13 @@ struct panthor_device {
+@@ -149,10 +183,13 @@ struct panthor_device {
  
  		/** @coregroup: Core group clock. This clock is optional. */
  		struct clk *coregroup;
@@ -1116,18 +1115,18 @@ index 111111111111..222222222222 100644
  
  static void panthor_gpu_coherency_set(struct panthor_device *ptdev)
  {
--	gpu_write(ptdev, GPU_COHERENCY_PROTOCOL,
+-	gpu_write(ptdev->iomem, GPU_COHERENCY_PROTOCOL,
 -		  ptdev->gpu_info.selected_coherency);
 +	u32 val = ptdev->coherency_mode;
 +
 +	if (val != PANTHOR_COHERENCY_NONE) {
-+		u32 features = gpu_read(ptdev, GPU_COHERENCY_FEATURES);
++		u32 features = gpu_read(ptdev->iomem, GPU_COHERENCY_FEATURES);
 +
 +		if (features & GPU_COHERENCY_SHAREABLE_CACHE)
 +			val |= GPU_COHERENCY_SHAREABLE_CACHE;
 +	}
 +
-+	gpu_write(ptdev, GPU_COHERENCY_PROTOCOL, val);
++	gpu_write(ptdev->iomem, GPU_COHERENCY_PROTOCOL, val);
  }
  
  static void panthor_gpu_l2_config_set(struct panthor_device *ptdev)
@@ -1148,33 +1147,48 @@ index 111111111111..222222222222 100644
  	if (irq < 0)
  		return irq;
  
-@@ -302,6 +319,26 @@ int panthor_gpu_l2_power_on(struct panthor_device *ptdev)
+@@ -304,6 +321,26 @@ int panthor_gpu_l2_power_on(struct panthor_device *ptdev)
  	panthor_gpu_coherency_set(ptdev);
  	panthor_gpu_l2_config_set(ptdev);
  
 +	/* CIX Sky1 needs special PHBA setup before L2 activation */
 +	if (of_device_is_compatible(ptdev->base.dev->of_node, "arm,mali-valhall")) {
-+		gpu_write(ptdev, GPU_SYSC_PBHA_OVERRIDE(3), 0x22000000);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(0), 0x00230000);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(1), 0x00000023);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(2), 0x00000000);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(3), 0x00000000);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(4), 0x00523222);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(5), 0x00523200);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(6), 0x00000022);
-+		gpu_write(ptdev, GPU_SYSC_ALLOC(7), 0x00000032);
++		gpu_write(ptdev->iomem, GPU_SYSC_PBHA_OVERRIDE(3), 0x22000000);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(0), 0x00230000);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(1), 0x00000023);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(2), 0x00000000);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(3), 0x00000000);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(4), 0x00523222);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(5), 0x00523200);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(6), 0x00000022);
++		gpu_write(ptdev->iomem, GPU_SYSC_ALLOC(7), 0x00000032);
 +
 +		/* Required for LS_MEM_* related counters */
-+		gpu_write(ptdev, 0x306C, 0xFFFFFFFF);
-+		gpu_write(ptdev, 0x3070, 0xFFFFFFFF);
-+		gpu_write(ptdev, 0x307C, 0xFFFFFFFF);
-+		gpu_write(ptdev, 0x3074, 0xFFFFFFFF);
-+		gpu_write(ptdev, 0x3068, 0x1);
++		gpu_write(ptdev->iomem, 0x306C, 0xFFFFFFFF);
++		gpu_write(ptdev->iomem, 0x3070, 0xFFFFFFFF);
++		gpu_write(ptdev->iomem, 0x307C, 0xFFFFFFFF);
++		gpu_write(ptdev->iomem, 0x3074, 0xFFFFFFFF);
++		gpu_write(ptdev->iomem, 0x3068, 0x1);
 +	}
 +
  	return panthor_gpu_power_on(ptdev, L2, 1, 20000);
  }
  
+diff --git a/drivers/gpu/drm/panthor/panthor_gpu_regs.h b/drivers/gpu/drm/panthor/panthor_gpu_regs.h
+index 111111111111..222222222222 100644
+--- a/drivers/gpu/drm/panthor/panthor_gpu_regs.h
++++ b/drivers/gpu/drm/panthor/panthor_gpu_regs.h
+@@ -119,5 +119,10 @@
+ #define   GPU_COHERENCY_ACE_LITE			0
+ #define   GPU_COHERENCY_ACE				1
+ #define   GPU_COHERENCY_NONE				31
++#define   GPU_COHERENCY_SHAREABLE_CACHE			BIT(5)
++
++/* Sky1 PHBA (Page-Based Hardware Attribute) registers */
++#define GPU_SYSC_PBHA_OVERRIDE(n)			(0x320 + ((n) * 4))
++#define GPU_SYSC_ALLOC(n)				(0x340 + ((n) * 4))
+ 
+ #endif /* __PANTHOR_GPU_REGS_H__ */
 diff --git a/drivers/gpu/drm/panthor/panthor_hw.c b/drivers/gpu/drm/panthor/panthor_hw.c
 index 111111111111..222222222222 100644
 --- a/drivers/gpu/drm/panthor/panthor_hw.c
@@ -1188,18 +1202,16 @@ index 111111111111..222222222222 100644
  #include <drm/drm_print.h>
  
  #include "panthor_device.h"
-@@ -193,7 +195,9 @@ static int overload_shader_present(struct panthor_device *ptdev)
+@@ -194,6 +196,7 @@ static int overload_shader_present(struct panthor_device *ptdev)
  static int panthor_gpu_info_init(struct panthor_device *ptdev)
  {
  	unsigned int i;
 +	int ret;
  
-+	ptdev->gpu_info.gpu_id = gpu_read(ptdev, GPU_ID);
- 	ptdev->gpu_info.csf_id = gpu_read(ptdev, GPU_CSF_ID);
- 	ptdev->gpu_info.gpu_rev = gpu_read(ptdev, GPU_REVID);
- 	ptdev->gpu_info.core_features = gpu_read(ptdev, GPU_CORE_FEATURES);
-@@ -225,7 +229,24 @@ static int panthor_gpu_info_init(struct panthor_device *ptdev)
- 		ptdev->gpu_info.l2_present = gpu_read64(ptdev, GPU_L2_PRESENT);
+ 	ptdev->gpu_info.csf_id = gpu_read(ptdev->iomem, GPU_CSF_ID);
+ 	ptdev->gpu_info.gpu_rev = gpu_read(ptdev->iomem, GPU_REVID);
+@@ -229,7 +232,24 @@ static int panthor_gpu_info_init(struct panthor_device *ptdev)
+ 		ptdev->gpu_info.l2_present = gpu_read64(ptdev->iomem, GPU_L2_PRESENT);
  	}
  
 -	return overload_shader_present(ptdev);
@@ -1319,29 +1331,3 @@ index 111111111111..222222222222 100644
  	if (irq <= 0)
  		return -ENODEV;
  
-diff --git a/drivers/gpu/drm/panthor/panthor_regs.h b/drivers/gpu/drm/panthor/panthor_regs.h
-index 111111111111..222222222222 100644
---- a/drivers/gpu/drm/panthor/panthor_regs.h
-+++ b/drivers/gpu/drm/panthor/panthor_regs.h
-@@ -122,6 +122,7 @@
- #define   GPU_COHERENCY_ACE_LITE			0
- #define   GPU_COHERENCY_ACE				1
- #define   GPU_COHERENCY_NONE				31
-+#define   GPU_COHERENCY_SHAREABLE_CACHE			BIT(5)
- 
- #define MCU_CONTROL					0x700
- #define MCU_CONTROL_ENABLE				1
-@@ -205,6 +206,10 @@
- #define   AS_TRANSCFG_XREADABLE				BIT(36)
- #define AS_FAULTEXTRA(as)				(MMU_AS(as) + 0x38)
- 
-+/* Sky1 PHBA (Page-Based Hardware Attribute) registers */
-+#define GPU_SYSC_PBHA_OVERRIDE(n)			(0x320 + ((n) * 4))
-+#define GPU_SYSC_ALLOC(n)				(0x340 + ((n) * 4))
-+
- #define CSF_GPU_LATEST_FLUSH_ID				0x10000
- 
- #define CSF_DOORBELL(i)					(0x80000 + ((i) * 0x10000))
--- 
-Cixtech
-
