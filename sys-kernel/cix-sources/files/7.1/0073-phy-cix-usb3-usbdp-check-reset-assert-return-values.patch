@@ -1,0 +1,373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 16:10:00 +0800
+Subject: phy: cix: usb3,usbdp: check reset assert() return values and make cleanup paths explicit
+
+The previous patch stopped these drivers from silently continuing
+past a failed reset/preset/clock *acquisition*, but several
+reset_control_assert() calls in the runtime init/exit paths and at
+the end of probe were still unchecked:
+
+ * sky1_u3phy_init()/sky1_udphy_init() began by unconditionally
+   calling reset_control_assert(reset) and reset_control_assert(preset)
+   with no return-value check, so a reset controller that failed to
+   assert would let the function continue enabling clocks and
+   programming registers against a PHY that might still be live.
+
+ * sky1_u3phy_exit()/sky1_udphy_exit() asserted reset/preset on
+   teardown without checking the result, silently discarding whether
+   the PHY was actually left safely in reset, and always returned 0
+   regardless (the return value is propagated by cix_u3phy_exit()/
+   cix_dp_phy_ops through struct phy_ops.exit(), so a real errno here
+   is meaningful to callers).
+
+ * cix_u3phy_probe() asserted reset/preset as the last step before
+   returning success and only dev_warn()'d on failure, which allowed
+   probe to succeed while the driver could not establish its required
+   starting state (PHY held in reset). Since the driver treats these
+   resets as mandatory throughout, a failure here is now propagated
+   with dev_err_probe() and probe fails.
+
+ * cix_udphy_probe() has an analogous conditional reset
+   (udphy->phy_reset, used to force a known state when firmware left
+   the PHY in an unknown role) that asserted reset/preset unchecked.
+   This is now checked and fails probe with dev_err_probe() rather
+   than continuing with an unconfirmed reset state.
+
+ * sky1_udphy_init()'s error-cleanup path could reach its "assert_apb"
+   label (asserting preset only) directly from a failed
+   reset_control_deassert(udphy->reset), without re-asserting the main
+   reset first. Since a failed deassert leaves the actual hardware
+   reset-line state unknown (it may have partially or fully applied
+   despite returning an error), skipping the reset re-assert on that
+   specific path could leave the PHY's functional reset deasserted
+   with clocks about to be torn down. Both drivers' cleanup paths are
+   restructured with explicit, unambiguous labels (err_assert_reset /
+   err_assert_preset / err_disable_*_clk) so every failure exit
+   re-asserts exactly the resets whose state is not already known-safe,
+   and reset/preset assert failures during cleanup are logged (without
+   overwriting the original error returned to the caller) instead of
+   being silently discarded.
+
+No arbitrary delays are introduced; this only adds error checking and
+makes existing cleanup ordering explicit.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0072100000000000000000000000000000000073
+---
+ drivers/phy/cix/phy-cix-usb3.c  | 79 +++++++++++++++++++++++++++++----------
+ drivers/phy/cix/phy-cix-usbdp.c | 82 ++++++++++++++++++++++++++++++++---------
+ 2 files changed, 123 insertions(+), 38 deletions(-)
+
+diff --git a/drivers/phy/cix/phy-cix-usb3.c b/drivers/phy/cix/phy-cix-usb3.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usb3.c
++++ b/drivers/phy/cix/phy-cix-usb3.c
+@@ -181,44 +181,71 @@ struct cix_u3phy {
+ 
+ static int sky1_u3phy_exit(struct cix_u3phy *u3phy)
+ {
++	int ret = 0;
++	int cleanup_ret;
++
+ 	u3phy->init_count--;
+ 	if (u3phy->init && (u3phy->init_count == 0)) {
+ 		dev_dbg(u3phy->dev, "sky1_u3phy_exit\n");
+-		reset_control_assert(u3phy->reset);
+-		reset_control_assert(u3phy->preset);
++
++		cleanup_ret = reset_control_assert(u3phy->reset);
++		if (cleanup_ret) {
++			dev_err(u3phy->dev, "failed to assert reset on exit: %d\n",
++				cleanup_ret);
++			ret = cleanup_ret;
++		}
++
++		cleanup_ret = reset_control_assert(u3phy->preset);
++		if (cleanup_ret) {
++			dev_err(u3phy->dev, "failed to assert preset on exit: %d\n",
++				cleanup_ret);
++			if (!ret)
++				ret = cleanup_ret;
++		}
++
+ 		clk_disable_unprepare(u3phy->apb_clk);
+ 		clk_disable_unprepare(u3phy->ref_clk);
+ 		u3phy->init = false;
+ 	}
+-	return 0;
++	return ret;
+ }
+ static int sky1_u3phy_init(struct cix_u3phy *u3phy)
+ {
+ 	int ret;
++	int cleanup_ret;
+ 
+ 	if (!u3phy->init) {
+ 		/* Hold the PHY in reset while clocks are (re)established. */
+-		reset_control_assert(u3phy->reset);
+-		reset_control_assert(u3phy->preset);
++		ret = reset_control_assert(u3phy->reset);
++		if (ret) {
++			dev_err(u3phy->dev, "Failed to assert reset: %d\n", ret);
++			return ret;
++		}
++
++		ret = reset_control_assert(u3phy->preset);
++		if (ret) {
++			dev_err(u3phy->dev, "Failed to assert preset: %d\n", ret);
++			return ret;
++		}
+ 
+ 		ret = clk_prepare_enable(u3phy->apb_clk);
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to prepare_enable u3phy apb clock: %d\n",
+ 				ret);
+-			goto assert_reset_preset;
++			return ret;
+ 		}
+ 
+ 		ret = clk_prepare_enable(u3phy->ref_clk);
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to prepare_enable u3phy ref clock: %d\n",
+ 				ret);
+-			goto disable_apb_clk;
++			goto err_disable_apb_clk;
+ 		}
+ 
+ 		ret = reset_control_deassert(u3phy->preset);
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to deassert preset: %d\n", ret);
+-			goto disable_ref_clk;
++			goto err_disable_ref_clk;
+ 		}
+ 
+ 		ret = regmap_multi_reg_write(u3phy->phy_regmap, sky1_u3phy_conf,
+@@ -226,13 +253,19 @@ static int sky1_u3phy_init(struct cix_u3phy *u3phy)
+ 
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to write the reg sequence\n");
+-			goto assert_preset;
++			goto err_assert_preset;
+ 		}
+ 
+ 		ret = reset_control_deassert(u3phy->reset);
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to deassert reset: %d\n", ret);
+-			goto assert_preset;
++			/*
++			 * A failed deassert leaves the actual reset line
++			 * state unknown, so unconditionally re-assert it
++			 * during cleanup rather than assuming it is still
++			 * held.
++			 */
++			goto err_assert_reset;
+ 		}
+ 
+ 		u3phy->init = true;
+@@ -241,16 +274,20 @@ static int sky1_u3phy_init(struct cix_u3phy *u3phy)
+ 	u3phy->init_count++;
+ 	return 0;
+ 
+-assert_preset:
+-	reset_control_assert(u3phy->preset);
+-disable_ref_clk:
++err_assert_reset:
++	cleanup_ret = reset_control_assert(u3phy->reset);
++	if (cleanup_ret)
++		dev_err(u3phy->dev, "failed to assert reset during cleanup: %d\n",
++			cleanup_ret);
++err_assert_preset:
++	cleanup_ret = reset_control_assert(u3phy->preset);
++	if (cleanup_ret)
++		dev_err(u3phy->dev, "failed to assert preset during cleanup: %d\n",
++			cleanup_ret);
++err_disable_ref_clk:
+ 	clk_disable_unprepare(u3phy->ref_clk);
+-disable_apb_clk:
++err_disable_apb_clk:
+ 	clk_disable_unprepare(u3phy->apb_clk);
+-assert_reset_preset:
+-	/* Leave the PHY safely held in reset on any failure path. */
+-	reset_control_assert(u3phy->preset);
+-	reset_control_assert(u3phy->reset);
+ 	u3phy->init = false;
+ 	return ret;
+ }
+@@ -450,11 +487,13 @@ static int cix_u3phy_probe(struct platform_device *pdev)
+ 
+ 	ret = reset_control_assert(u3phy->reset);
+ 	if (ret)
+-		dev_warn(dev, "failed to assert reset at probe: %d\n", ret);
++		return dev_err_probe(dev, ret,
++				      "failed to assert reset at probe\n");
+ 
+ 	ret = reset_control_assert(u3phy->preset);
+ 	if (ret)
+-		dev_warn(dev, "failed to assert preset at probe: %d\n", ret);
++		return dev_err_probe(dev, ret,
++				      "failed to assert preset at probe\n");
+ 
+ 	dev_info(dev, "CIX USB3 PHY ready: apb_clk=%luHz ref_clk=%luHz reset/preset acquired\n",
+ 		 clk_get_rate(u3phy->apb_clk), clk_get_rate(u3phy->ref_clk));
+diff --git a/drivers/phy/cix/phy-cix-usbdp.c b/drivers/phy/cix/phy-cix-usbdp.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usbdp.c
++++ b/drivers/phy/cix/phy-cix-usbdp.c
+@@ -671,16 +671,34 @@ static int sky1_udphy_clk_enable(struct clk *clk)
+ 
+ static int sky1_udphy_exit(struct cix_udphy *udphy)
+ {
++	int ret = 0;
++	int cleanup_ret;
++
+ 	dev_dbg(udphy->dev, "sky1_udphy_exit\n");
+-	reset_control_assert(udphy->reset);
+-	reset_control_assert(udphy->preset);
++
++	cleanup_ret = reset_control_assert(udphy->reset);
++	if (cleanup_ret) {
++		dev_err(udphy->dev, "failed to assert reset on exit: %d\n",
++			cleanup_ret);
++		ret = cleanup_ret;
++	}
++
++	cleanup_ret = reset_control_assert(udphy->preset);
++	if (cleanup_ret) {
++		dev_err(udphy->dev, "failed to assert preset on exit: %d\n",
++			cleanup_ret);
++		if (!ret)
++			ret = cleanup_ret;
++	}
++
+ 	clk_disable_unprepare(udphy->apb_clk);
+-	return 0;
++	return ret;
+ }
+ 
+ static int sky1_udphy_init(struct cix_udphy *udphy)
+ {
+ 	int ret;
++	int cleanup_ret;
+ 	u32 value;
+ 
+ 	regmap_update_bits(udphy->usbphy_syscon, udphy->cfg->con_dir[udphy->id].offset,
+@@ -693,8 +711,17 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 	dev_info(udphy->dev, "sky1_udphy_init: typec dir= 0x%x\n", value);
+ 
+ 	/* Hold the PHY in reset while clocks are (re)established. */
+-	reset_control_assert(udphy->reset);
+-	reset_control_assert(udphy->preset);
++	ret = reset_control_assert(udphy->reset);
++	if (ret) {
++		dev_err(udphy->dev, "Failed to assert reset: %d\n", ret);
++		return ret;
++	}
++
++	ret = reset_control_assert(udphy->preset);
++	if (ret) {
++		dev_err(udphy->dev, "Failed to assert preset: %d\n", ret);
++		return ret;
++	}
+ 
+ 	ret = sky1_udphy_clk_enable(udphy->apb_clk);
+ 	if (ret) {
+@@ -705,7 +732,7 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 	ret = reset_control_deassert(udphy->preset);
+ 	if (ret) {
+ 		dev_err(udphy->dev, "Failed to deassert preset: %d\n", ret);
+-		goto assert_apb;
++		goto err_disable_apb_clk;
+ 	}
+ 
+ 	if (udphy->next_mode == UDPHY_MODE_DP) {
+@@ -715,7 +742,7 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 
+ 		if (ret) {
+ 			dev_err(udphy->dev, "Failed to write the reg sequence\n");
+-			goto assert_apb;
++			goto err_assert_preset;
+ 		}
+ 	} else {
+ 		if (!udphy->flip) {
+@@ -723,14 +750,14 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 							ARRAY_SIZE(sky1_udphy_usbdp_conf_normal));
+ 			if (ret) {
+ 				dev_err(udphy->dev, "Failed to write the reg sequence\n");
+-				goto assert_apb;
++				goto err_assert_preset;
+ 			}
+ 		} else {
+ 			ret = regmap_multi_reg_write(udphy->phy_regmap, sky1_udphy_usbdp_conf_flip,
+ 							ARRAY_SIZE(sky1_udphy_usbdp_conf_flip));
+ 			if (ret) {
+ 				dev_err(udphy->dev, "Failed to write the reg sequence\n");
+-				goto assert_apb;
++				goto err_assert_preset;
+ 			}
+ 		}
+ 	}
+@@ -738,14 +765,19 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 	ret = reset_control_deassert(udphy->reset);
+ 	if (ret) {
+ 		dev_err(udphy->dev, "Failed to deassert reset: %d\n", ret);
+-		goto assert_apb;
++		/*
++		 * A failed deassert leaves the actual reset line state
++		 * unknown, so unconditionally re-assert it during cleanup
++		 * rather than assuming it is still held.
++		 */
++		goto err_assert_reset;
+ 	}
+ 
+ 	ret = udphy_status_check(udphy);
+ 
+ 	if (ret) {
+ 		dev_err(udphy->dev, "phy status not ready\n");
+-		goto assert_phy;
++		goto err_assert_reset;
+ 	}
+ 
+ 	dev_dbg(udphy->dev, "sky1_udphy_init: PHY out of reset, mode=%d flip=%d\n",
+@@ -753,11 +785,17 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 
+ 	return 0;
+ 
+-assert_phy:
+-	reset_control_assert(udphy->reset);
+-
+-assert_apb:
+-	reset_control_assert(udphy->preset);
++err_assert_reset:
++	cleanup_ret = reset_control_assert(udphy->reset);
++	if (cleanup_ret)
++		dev_err(udphy->dev, "failed to assert reset during cleanup: %d\n",
++			cleanup_ret);
++err_assert_preset:
++	cleanup_ret = reset_control_assert(udphy->preset);
++	if (cleanup_ret)
++		dev_err(udphy->dev, "failed to assert preset during cleanup: %d\n",
++			cleanup_ret);
++err_disable_apb_clk:
+ 	clk_disable_unprepare(udphy->apb_clk);
+ 	return ret;
+ }
+@@ -1547,8 +1585,16 @@ static int cix_udphy_probe(struct platform_device *pdev)
+ 	}
+ 	if (udphy->phy_reset) {
+ 		dev_info(dev, "phy reset\n");
+-		reset_control_assert(udphy->reset);
+-		reset_control_assert(udphy->preset);
++
++		ret = reset_control_assert(udphy->reset);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					      "failed to assert reset during probe recovery\n");
++
++		ret = reset_control_assert(udphy->preset);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					      "failed to assert preset during probe recovery\n");
+ 	}
+ 
+ 	udphy->apb_clk = devm_clk_get(dev, "pclk");
