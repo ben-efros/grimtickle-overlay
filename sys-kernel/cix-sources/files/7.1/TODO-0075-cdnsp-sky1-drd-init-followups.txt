@@ -1,0 +1,132 @@
+SPDX-License-Identifier: GPL-2.0
+Module: drivers/usb/cdns3/cdnsp-sky1.c (cdnsp_sky1_drd_init())
+Patch:  0075-usb-cdns3-sky1-defer-probe-acpi-race-add-reset-diag.patch
+Status: open follow-ups, not yet implemented
+Filed:  2026-07-26
+
+Purpose
+-------
+This is a TODO note, not a patch. `eapply "*.patch"` in the ebuild only
+picks up *.patch files, so this file is inert to the build; it exists
+purely to record reviewer follow-ups against 0075 for the next round
+of hardening of cdnsp_sky1_drd_init() before they are implemented.
+
+Reviewer verdict on the current (round 5) state of 0075
+--------------------------------------------------------
+"Safe enough for controlled testing after checking
+sky1_set_mode_by_id() and clarifying preset ordering. The revised
+patch is far better for storage integrity than the previous version.
+It now fails closed rather than permitting a half-initialized
+xHCI/Cadence controller to accept UAS commands."
+
+Confirmed already correct in the current patch
+------------------------------------------------
+ * Aborts if the main reset_control_assert() fails.
+ * Aborts if the preset reset_control_assert() fails.
+ * Relies on sky1_usb_clk_enable_all()'s built-in partial-enable
+   cleanup on its own failure.
+ * Disables clocks if preset deassertion fails.
+ * Reasserts preset and disables clocks if the main reset cannot be
+   released.
+ * Returns the real failure code instead of 0.
+ * Propagates controller-reset failure out of cdnsp_controller_resume()
+   before PHY reinitialization is attempted.
+ * Defers reset lookup during the ACPI injection race.
+
+Open items for the next round
+------------------------------
+
+1. Check sky1_set_mode_by_id() return value (most important remaining gap)
+
+   The patch still does:
+
+       writel(CIX_USB_AXI_WR_CACHE_VALUE, data->axi_base);
+       sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG);
+
+   without checking the result. sky1_set_mode_by_id() returns
+   regmap_update_bits()'s result, so it can fail. Continuing after a
+   failed mode-strap update can leave the controller in the wrong
+   host/device/OTG mode while cdnsp_sky1_drd_init() still returns
+   success overall.
+
+   Proposed fix:
+
+       ret = sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG);
+       if (ret) {
+               dev_err(data->dev,
+                       "cdnsp_sky1_drd_init: failed to set OTG mode: %d\n",
+                       ret);
+               goto err_disable_clk;
+       }
+
+2. Resolve the preset-ordering inconsistency between code and commit message
+
+   The 0075 commit message states preset must be deasserted before
+   AXI/XEC programming can be trusted, but the code currently performs
+   the AXI cache-value write and sky1_set_mode_by_id() *before*
+   reset_control_deassert(data->preset), with the remaining XEC
+   register programming only occurring after preset is released.
+
+   Need to pick one of:
+     a) If axi_base and the mode syscon are independent wrapper
+        registers that remain accessible while preset is asserted,
+        amend the commit message to say only the controller/XEC
+        register block requires preset release (not these two calls).
+     b) If preset gates those accesses too, move both operations to
+        after reset_control_deassert(data->preset) succeeds.
+
+   The code and commit message currently assert two different
+   hardware assumptions; only one can be right and it needs to be
+   checked against vendor documentation/register definitions before
+   deciding which way to resolve it.
+
+3. Check the cleanup reset (re)assertion on the final unwind path
+
+   On final reset_control_deassert(data->reset) failure, the cleanup
+   label currently does:
+
+       err_assert_preset:
+               reset_control_assert(data->preset);
+
+   unchecked. The original failure should remain the function's
+   return value, but a failure to reassert preset during cleanup
+   should still be logged rather than silently assumed to have
+   succeeded:
+
+       int cleanup_ret;
+
+       cleanup_ret = reset_control_assert(data->preset);
+       if (cleanup_ret)
+               dev_err(data->dev,
+                       "failed to reassert preset during cleanup: %d\n",
+                       cleanup_ret);
+
+   Not expected to cause corruption on its own (the main reset
+   deassert already failed), but the code should not implicitly claim
+   a fully-quiesced known state without verifying it.
+
+4. Make clock cleanup retry-safe
+
+   sky1_usb_clk_enable_all()'s own failure path is fine: it unwinds
+   only the clocks it successfully enabled before returning.
+
+   sky1_usb_clk_disable_all(), however, disables clocks but leaves
+   their pointers populated. After a failed drd_init() unwind, a later
+   retry (e.g. a subsequent probe/resume attempt) calling
+   sky1_usb_clk_disable_all() again could disable already-disabled
+   clocks and unbalance clk-framework enable-count accounting.
+
+   Long-term fix: acquire all clocks once during probe, enable/disable
+   them without repeatedly calling devm_clk_get(), and track whether
+   the clock group is currently enabled (e.g. a bool on the drd data
+   struct) so disable is only ever called on an enabled group.
+
+   Smaller/incremental fix: clear each clk pointer after disabling it
+   and make the disable-all helper tolerate/skip NULL entries.
+
+Next steps
+----------
+Implement items 1-4 above as a follow-up revision of 0075, verify by
+real compile against /usr/src/linux-7.1.2-cix (materializing
+include/linux/soc/cix/cix-acpi-resource-lookup.h from 0072+0074 as
+usual), confirm zero new warnings, and regenerate the patch file.
