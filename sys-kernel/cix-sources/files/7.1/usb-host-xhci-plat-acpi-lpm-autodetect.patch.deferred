@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 14:00:00 +0800
+Subject: usb: host: xhci-plat: auto-detect LPM support under ACPI from HCSPARAMS3
+
+On CIX Sky1 (and other ACPI-described platform xHCI controllers), the
+only way XHCI_LPM_SUPPORT currently gets set is when firmware supplies
+the "usb3-lpm-capable" boolean device property in xhci_priv_init()'s
+property scan. Under ACPI, this property is not supplied, so the
+quirk is never set and the driver logs:
+
+  We don't know the algorithms for LPM for this host, disabling LPM.
+
+xhci_plat_quirks() already runs after xhci_gen_setup() has cached the
+read-only capability registers (xhci->hcs_params3 is populated at
+drivers/usb/host/xhci.c before get_quirks() is invoked), so the
+controller's own U1/U2 exit-latency fields are available at the point
+this quirk callback runs and can be used as a hardware-capability
+fallback when no firmware property was supplied.
+
+Add a fallback in xhci_plat_quirks(): when running under an ACPI
+device node and XHCI_LPM_SUPPORT has not already been set via a
+property, set it if the controller reports a nonzero U1 or U2 device
+exit latency in HCSPARAMS3. This mirrors the equivalent Sky1-Linux
+downstream patch and brings the ACPI integration path in line with
+what the DT path already gets from "usb3-lpm-capable".
+
+This only affects idle-link power-management behavior (U1/U2 LPM
+entry, suspend/resume, and long-running link stability) - it does not
+change enumeration, and is not expected by itself to explain
+enumeration-time failures such as a hub-depth "set hub depth failed"
+or -71 protocol errors, since those occur before USB core aggressively
+drives the link into U1/U2. It is a genuine correctness fix (the
+capability was always present in hardware but unreported to the LPM
+core under ACPI) and should be verified by confirming
+"disabling LPM" no longer appears in dmesg after boot.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0078000000000000000000000000000000000078
+---
+ drivers/usb/host/xhci-plat.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/drivers/usb/host/xhci-plat.c b/drivers/usb/host/xhci-plat.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/host/xhci-plat.c
++++ b/drivers/usb/host/xhci-plat.c
+@@ -90,6 +90,17 @@ static void xhci_plat_quirks(struct device *dev, struct xhci_hcd *xhci)
+ 	struct xhci_plat_priv *priv = xhci_to_priv(xhci);
+ 
+ 	xhci->quirks |= priv->quirks;
++
++	/*
++	 * For ACPI platform controllers, auto-detect LPM support from
++	 * hardware capability registers. Under DT, usb3-lpm-capable is
++	 * normally supplied as a firmware property.
++	 */
++	if (!(xhci->quirks & XHCI_LPM_SUPPORT) &&
++	    is_acpi_device_node(dev_fwnode(dev)) &&
++	    (HCS_U1_LATENCY(xhci->hcs_params3) |
++	     HCS_U2_LATENCY(xhci->hcs_params3)))
++		xhci->quirks |= XHCI_LPM_SUPPORT;
+ }
+ 
+ /* called during probe() after chip reset completes */
