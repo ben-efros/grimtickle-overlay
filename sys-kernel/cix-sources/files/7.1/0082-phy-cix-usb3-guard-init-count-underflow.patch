@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 00:00:00 +0800
+Subject: phy: cix: usb3: guard init_count against underflow on unbalanced exit
+
+sky1_u3phy_exit() unconditionally decrements u3phy->init_count on every
+call, then only tears down the PHY (asserting reset/preset, disabling
+clocks) when the result reaches exactly zero. This works correctly for
+a perfectly balanced sequence of init/exit calls, but there is no
+guard against a mismatched sequence - e.g. an extra phy_exit()/
+power_off() call without a matching phy_init()/power_on(), or a
+consumer driver calling exit twice along an error-recovery path.
+
+If init_count is ever decremented past zero, the "init_count == 0"
+check can only become true again after exactly as many further
+unbalanced exit calls as it takes to count back up to zero - or never
+again, if the imbalance keeps recurring - permanently breaking this
+PHY's ability to actually assert reset and disable its clocks on what
+its caller believes is a genuine last reference drop. This is a
+latent robustness issue in the init/exit reference counting scheme,
+not a fix for an observed instability, but is straightforward to
+guard against defensively rather than trusting every caller and code
+path to always balance init/exit perfectly.
+
+Add a check at the top of sky1_u3phy_exit(): if init_count is already
+zero or negative, log a warning and return without decrementing
+further, leaving the counter at its current (already-safe) value
+instead of driving it negative.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0081000000000000000000000000000000000081
+---
+ drivers/phy/cix/phy-cix-usb3.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/phy/cix/phy-cix-usb3.c b/drivers/phy/cix/phy-cix-usb3.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usb3.c
++++ b/drivers/phy/cix/phy-cix-usb3.c
+@@ -184,6 +184,26 @@ static int sky1_u3phy_exit(struct cix_u3phy *u3phy)
+ 	int ret = 0;
+ 	int cleanup_ret;
+ 
++	/*
++	 * A mismatched init/exit call sequence (e.g. an extra phy_exit()/
++	 * power_off() without a matching phy_init()/power_on(), or a
++	 * consumer driver calling exit twice on error-recovery paths) would
++	 * otherwise decrement init_count below zero here. Once negative, the
++	 * "init_count == 0" check below can only be reached again by exactly
++	 * as many further unbalanced exit calls as it takes to count back up
++	 * to zero, or never at all if init_count keeps being decremented -
++	 * permanently breaking this PHY's ability to actually assert reset/
++	 * disable its clocks on what its caller believes is a genuine last
++	 * reference drop. Guard defensively instead of trusting callers to
++	 * always balance init/exit.
++	 */
++	if (u3phy->init_count <= 0) {
++		dev_warn(u3phy->dev,
++			 "sky1_u3phy_exit called with init_count=%d, ignoring unbalanced call\n",
++			 u3phy->init_count);
++		return 0;
++	}
++
+ 	u3phy->init_count--;
+ 	if (u3phy->init && (u3phy->init_count == 0)) {
+ 		dev_dbg(u3phy->dev, "sky1_u3phy_exit\n");
