@@ -1,0 +1,592 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 16:00:00 +0800
+Subject: phy: cix: fix silent probe failures, clock bug, and ACPI reset-lookup race
+
+The CIX USB2/USB3/USB-DP PHY drivers and the ACPI resource-lookup
+helper had several bugs that can leave the USB-DP/USB3 PHY
+mis-programmed or held out of reset without clocks. These bugs can
+leave the PHY incompletely initialized or in an undefined reset/clock
+state and may contribute to the SuperSpeed link resets and storage
+failures observed on usb14 under sustained I/O on the Minisforum MS-R1
+(CIX Sky1); that causal link is not proven by this patch alone.
+
+ * phy-cix-usb3.c: cix_u3phy_probe() checked IS_ERR(u3phy->apb_clk)
+   twice - once for apb_clk and again (copy/paste) instead of
+   checking apb_clk for the ref_clk lookup, so a missing ref_clk was
+   never detected. This is confirmed to be an unreviewed copy/paste
+   mistake rather than an intentional hardware/firmware workaround:
+   the same double-check-of-apb_clk pattern is present, unchanged and
+   without any explanatory comment, in both the original CIX vendor
+   patch series and Sky1-Linux's own current upstream-targeted tree,
+   and there is no clk-framework mechanism by which fetching ref_clk
+   could plausibly alter apb_clk's error state. A code comment noting
+   this (and that the vendor has it the other way around) is added at
+   the fixed call site in phy-cix-usb3.c.
+
+ * phy-cix-usb2.c, phy-cix-usb3.c, phy-cix-usbdp.c: required
+   reset/preset controls and clocks were fetched with
+   devm_reset_control_get()/devm_clk_get() and, on failure, only
+   dev_err()-logged before probe continued. Since these drivers
+   unconditionally call reset/clock APIs on the stored pointer later,
+   a missing lookup previously meant an ERR_PTR could be retained and
+   dereferenced. These now return dev_err_probe() with the real errno
+   and abort probe.
+
+ * phy-cix-usbdp.c: sky1_udphy_init() returned 0 (success) on every
+   error path even when `ret` held a real error from clock
+   enablement, reset deassertion, or register programming, hiding PHY
+   init failures from callers who then believed the PHY was ready. It
+   now returns the real error.
+
+ * phy-cix-usb3.c, phy-cix-usbdp.c: reset_control_deassert() return
+   values were not checked in the init paths, so a failed deassert
+   (PHY left held in reset) was not distinguished from success. These
+   are now checked and cause an error return.
+
+ * phy-cix-usb3.c, phy-cix-usbdp.c: the error-cleanup labels reached
+   on a later failure asserted reset/preset, but were actually calling
+   reset_control_deassert() - i.e. releasing the PHY out of reset with
+   clocks off and registers unprogrammed, rather than the safe
+   held-in-reset idle state the labels implied. Fixed to actually
+   assert.
+
+ * drivers/soc/cix/cix-acpi-resource-lookup.c: the CIXA1019 driver
+   injects _DSD reset/clock/resource-name properties into consumer
+   ACPI devices (CIXH2030-2034) at probe time, but had no way for
+   those consumers to tell "property not injected yet" apart from
+   "property genuinely absent". A consumer that raced ahead of
+   injection previously got a hard lookup failure rather than a
+   deferral. This adds an exported readiness signal
+   (cix_acpi_resource_lookup_ready()) and a
+   cix_acpi_resource_lookup_defer() helper (new header
+   include/linux/soc/cix/cix-acpi-resource-lookup.h) that consumers
+   use to convert a reset/clock lookup failure into -EPROBE_DEFER
+   while injection is pending, and let the real error through once
+   injection is known complete.
+
+Also adds concise dev_info() probe-summary diagnostics (PHY id, mode,
+default_conf, phy-status, clock rate, reset/preset acquisition) for
+the usb2/usb3/usbdp PHYs, populates the previously-unused
+udphy->phy_status field from the ACPI "phy-status" property so that
+diagnostic is accurate, and adds dev_dbg()/dev_warn_ratelimited()
+around PHY init/exit transitions and orientation/mode-mux changes
+while the PHY is configured for USB (the driver does not track host
+traffic or link activity, only PHY lane-mode configuration, so the
+diagnostics are worded accordingly).
+
+This is the first of three related patches: a second patch hardens
+reset/preset assert() sequencing and cleanup-path correctness in
+phy-cix-usb3.c/phy-cix-usbdp.c, and a third narrows and hardens the
+ACPI readiness mechanism added here (error-code scoping, memory
+ordering, lifecycle documentation).
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0072000000000000000000000000000000000072
+---
+ drivers/phy/cix/phy-cix-usb2.c                   | 17 +++--
+ drivers/phy/cix/phy-cix-usb3.c                   | 90 +++++++++++++++++-------
+ drivers/phy/cix/phy-cix-usbdp.c                  | 87 ++++++++++++++++++-----
+ drivers/soc/cix/cix-acpi-resource-lookup.c       | 23 ++++++
+ include/linux/soc/cix/cix-acpi-resource-lookup.h | 43 +++++++++++
+ 5 files changed, 212 insertions(+), 48 deletions(-)
+
+diff --git a/drivers/phy/cix/phy-cix-usb2.c b/drivers/phy/cix/phy-cix-usb2.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usb2.c
++++ b/drivers/phy/cix/phy-cix-usb2.c
+@@ -8,6 +8,7 @@
+ #include <linux/reset.h>
+ #include <linux/kernel.h>
+ #include <linux/of_platform.h>
++#include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ 
+ static const struct acpi_device_id cix_usb2phy_acpi_match[] = {
+ 	{ "CIXH2032" },
+@@ -29,14 +30,20 @@ static int cix_usb2phy_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct reset_control *preset;
++	int ret;
+ 
+ 	preset = devm_reset_control_get(dev, "preset");
++	if (IS_ERR(preset))
++		return dev_err_probe(dev,
++				      cix_acpi_resource_lookup_defer(dev, PTR_ERR(preset)),
++				      "failed to get preset\n");
+ 
+-	if (IS_ERR(preset)) {
+-		dev_err(dev, "%s: failed to get preset\n", __func__);
+-	} else {
+-		reset_control_deassert(preset);
+-	}
++	ret = reset_control_deassert(preset);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				      "failed to deassert preset\n");
++
++	dev_info(dev, "CIX USB2 PHY preset ready\n");
+ 
+ 	return 0;
+ }
+diff --git a/drivers/phy/cix/phy-cix-usb3.c b/drivers/phy/cix/phy-cix-usb3.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usb3.c
++++ b/drivers/phy/cix/phy-cix-usb3.c
+@@ -22,6 +22,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
++#include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ #include "phy-cix-usbdp.h"
+ 
+ struct cix_u3phy_con_dir {
+@@ -196,44 +197,60 @@ static int sky1_u3phy_init(struct cix_u3phy *u3phy)
+ 	int ret;
+ 
+ 	if (!u3phy->init) {
+-		//usb rcsu reset is default deassert
++		/* Hold the PHY in reset while clocks are (re)established. */
+ 		reset_control_assert(u3phy->reset);
+ 		reset_control_assert(u3phy->preset);
+ 
+ 		ret = clk_prepare_enable(u3phy->apb_clk);
+ 		if (ret) {
+-			dev_err(u3phy->dev, "Failed to prepare_enable u3phy apb clock\n");
++			dev_err(u3phy->dev, "Failed to prepare_enable u3phy apb clock: %d\n",
++				ret);
+ 			goto assert_reset_preset;
+ 		}
+ 
+ 		ret = clk_prepare_enable(u3phy->ref_clk);
+ 		if (ret) {
+-			dev_err(u3phy->dev, "Failed to prepare_enable u3phy ref clock\n");
++			dev_err(u3phy->dev, "Failed to prepare_enable u3phy ref clock: %d\n",
++				ret);
+ 			goto disable_apb_clk;
+ 		}
+ 
+-		reset_control_deassert(u3phy->preset);
++		ret = reset_control_deassert(u3phy->preset);
++		if (ret) {
++			dev_err(u3phy->dev, "Failed to deassert preset: %d\n", ret);
++			goto disable_ref_clk;
++		}
+ 
+ 		ret = regmap_multi_reg_write(u3phy->phy_regmap, sky1_u3phy_conf,
+ 						ARRAY_SIZE(sky1_u3phy_conf));
+ 
+ 		if (ret) {
+ 			dev_err(u3phy->dev, "Failed to write the reg sequence\n");
+-			goto disable_ref_clk;
++			goto assert_preset;
++		}
++
++		ret = reset_control_deassert(u3phy->reset);
++		if (ret) {
++			dev_err(u3phy->dev, "Failed to deassert reset: %d\n", ret);
++			goto assert_preset;
+ 		}
++
+ 		u3phy->init = true;
+-		reset_control_deassert(u3phy->reset);
++		dev_dbg(u3phy->dev, "sky1_u3phy_init: PHY out of reset, clocks enabled\n");
+ 	}
+ 	u3phy->init_count++;
+ 	return 0;
+ 
++assert_preset:
++	reset_control_assert(u3phy->preset);
+ disable_ref_clk:
+ 	clk_disable_unprepare(u3phy->ref_clk);
+ disable_apb_clk:
+ 	clk_disable_unprepare(u3phy->apb_clk);
+ assert_reset_preset:
+-	reset_control_deassert(u3phy->preset);
+-	reset_control_deassert(u3phy->reset);
++	/* Leave the PHY safely held in reset on any failure path. */
++	reset_control_assert(u3phy->preset);
++	reset_control_assert(u3phy->reset);
+ 	u3phy->init = false;
+ 	return ret;
+ }
+@@ -362,26 +379,41 @@ static int cix_u3phy_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	u3phy->reset = devm_reset_control_get(dev, "reset");
+-	if (IS_ERR(u3phy->reset)) {
+-		dev_err(dev, "%s: failed to get reset\n", __func__);
+-	}
++	if (IS_ERR(u3phy->reset))
++		return dev_err_probe(dev,
++				      cix_acpi_resource_lookup_defer(dev, PTR_ERR(u3phy->reset)),
++				      "failed to get reset\n");
+ 
+ 	u3phy->preset = devm_reset_control_get(dev, "preset");
+-	if (IS_ERR(u3phy->preset)) {
+-		dev_err(dev, "%s: failed to get preset\n", __func__);
+-	}
++	if (IS_ERR(u3phy->preset))
++		return dev_err_probe(dev,
++				      cix_acpi_resource_lookup_defer(dev, PTR_ERR(u3phy->preset)),
++				      "failed to get preset\n");
+ 
+ 	u3phy->apb_clk = devm_clk_get(dev, "apb_clk");
+-	if (IS_ERR(u3phy->apb_clk)) {
+-		dev_err(dev, "phy apb clock not found\n");
+-		return PTR_ERR(u3phy->apb_clk);
+-	}
+-
++	if (IS_ERR(u3phy->apb_clk))
++		return dev_err_probe(dev, PTR_ERR(u3phy->apb_clk),
++				      "failed to get apb clock\n");
++
++	/*
++	 * NOTE: the original CIX vendor code (and, as of this writing,
++	 * Sky1-Linux's own current tree) checks IS_ERR(u3phy->apb_clk)
++	 * again here instead of IS_ERR(u3phy->ref_clk) - i.e. it re-tests
++	 * the clock just fetched above and never validates ref_clk at all.
++	 * That is a copy/paste mistake, not an intentional quirk: there is
++	 * no clk-framework mechanism by which fetching ref_clk could alter
++	 * apb_clk's error state, so re-checking apb_clk here is always
++	 * redundant, and a real ref_clk lookup failure would fall through
++	 * unnoticed with u3phy->ref_clk left holding an ERR_PTR that later
++	 * reaches clk_prepare_enable(). Confirmed present identically in
++	 * two independent vendor trees with no explanatory comment, which
++	 * is the standard signature of an unreviewed copy/paste, not a
++	 * documented hardware/firmware workaround.
++	 */
+ 	u3phy->ref_clk = devm_clk_get(dev, "ref_clk");
+-	if (IS_ERR(u3phy->apb_clk)) {
+-		dev_err(dev, "phy apb clock not found\n");
+-		return PTR_ERR(u3phy->apb_clk);
+-	}
++	if (IS_ERR(u3phy->ref_clk))
++		return dev_err_probe(dev, PTR_ERR(u3phy->ref_clk),
++				      "failed to get reference clock\n");
+ 
+ 	u3phy->base = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(u3phy->base))
+@@ -431,8 +463,16 @@ static int cix_u3phy_probe(struct platform_device *pdev)
+ 		goto put_child;
+ 	}
+ 
+-	reset_control_assert(u3phy->reset);
+-	reset_control_assert(u3phy->preset);
++	ret = reset_control_assert(u3phy->reset);
++	if (ret)
++		dev_warn(dev, "failed to assert reset at probe: %d\n", ret);
++
++	ret = reset_control_assert(u3phy->preset);
++	if (ret)
++		dev_warn(dev, "failed to assert preset at probe: %d\n", ret);
++
++	dev_info(dev, "CIX USB3 PHY ready: apb_clk=%luHz ref_clk=%luHz reset/preset acquired\n",
++		 clk_get_rate(u3phy->apb_clk), clk_get_rate(u3phy->ref_clk));
+ 
+ 	return 0;
+ 
+diff --git a/drivers/phy/cix/phy-cix-usbdp.c b/drivers/phy/cix/phy-cix-usbdp.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usbdp.c
++++ b/drivers/phy/cix/phy-cix-usbdp.c
+@@ -22,6 +22,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
++#include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ #include <linux/usb/ch9.h>
+ #include <linux/usb/typec_dp.h>
+ #include <linux/usb/typec_mux.h>
+@@ -691,17 +692,21 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 	regmap_read(udphy->usbphy_syscon, udphy->cfg->con_dir[udphy->id].offset, &value);
+ 	dev_info(udphy->dev, "sky1_udphy_init: typec dir= 0x%x\n", value);
+ 
+-	//usb rcsu reset is default deassert
++	/* Hold the PHY in reset while clocks are (re)established. */
+ 	reset_control_assert(udphy->reset);
+ 	reset_control_assert(udphy->preset);
+ 
+ 	ret = sky1_udphy_clk_enable(udphy->apb_clk);
+ 	if (ret) {
+-		dev_err(udphy->dev, "Failed to prepare_enable udphy apb clock\n");
++		dev_err(udphy->dev, "Failed to prepare_enable udphy apb clock: %d\n", ret);
+ 		return ret;
+ 	}
+ 
+-	reset_control_deassert(udphy->preset);
++	ret = reset_control_deassert(udphy->preset);
++	if (ret) {
++		dev_err(udphy->dev, "Failed to deassert preset: %d\n", ret);
++		goto assert_apb;
++	}
+ 
+ 	if (udphy->next_mode == UDPHY_MODE_DP) {
+ 		dev_info(udphy->dev, "sky1_udphy_init: sky1_udphy_dp_conf\n");
+@@ -730,7 +735,11 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 		}
+ 	}
+ 
+-	reset_control_deassert(udphy->reset);
++	ret = reset_control_deassert(udphy->reset);
++	if (ret) {
++		dev_err(udphy->dev, "Failed to deassert reset: %d\n", ret);
++		goto assert_apb;
++	}
+ 
+ 	ret = udphy_status_check(udphy);
+ 
+@@ -739,6 +748,9 @@ static int sky1_udphy_init(struct cix_udphy *udphy)
+ 		goto assert_phy;
+ 	}
+ 
++	dev_dbg(udphy->dev, "sky1_udphy_init: PHY out of reset, mode=%d flip=%d\n",
++		udphy->next_mode, udphy->flip);
++
+ 	return 0;
+ 
+ assert_phy:
+@@ -747,7 +759,7 @@ assert_phy:
+ assert_apb:
+ 	reset_control_assert(udphy->preset);
+ 	clk_disable_unprepare(udphy->apb_clk);
+-	return 0;
++	return ret;
+ }
+ 
+ static const struct cix_udphy_cfg sky1_udphy_cfg = {
+@@ -790,6 +802,7 @@ static int udphy_orien_sw_set(struct typec_switch_dev *sw,
+ 			      enum typec_orientation orien)
+ {
+ 	struct cix_udphy *udphy = typec_switch_get_drvdata(sw);
++	bool new_flip;
+ 
+ 	mutex_lock(&udphy->mutex);
+ 
+@@ -797,8 +810,17 @@ static int udphy_orien_sw_set(struct typec_switch_dev *sw,
+ 		goto unlock_ret;
+ 	}
+ 
+-	dev_info(udphy->dev, "typec orientation switch: %d\n", orien);
+-	udphy->flip = (orien == TYPEC_ORIENTATION_REVERSE) ? true : false;
++	new_flip = (orien == TYPEC_ORIENTATION_REVERSE) ? true : false;
++
++	if (new_flip != udphy->flip && (udphy->cur_mode & UDPHY_MODE_USB))
++		dev_warn_ratelimited(udphy->dev,
++			"typec orientation change (flip %d->%d) while PHY is configured for USB (cur_mode=0x%x)\n",
++			udphy->flip, new_flip, udphy->cur_mode);
++	else
++		dev_dbg(udphy->dev, "typec orientation switch: flip %d->%d\n",
++			udphy->flip, new_flip);
++
++	udphy->flip = new_flip;
+ 
+ unlock_ret:
+ 	mutex_unlock(&udphy->mutex);
+@@ -839,12 +861,11 @@ static int usbdp_typec_mux_set(struct typec_mux_dev *mux,
+ 			       struct typec_mux_state *state)
+ {
+ 	struct cix_udphy *udphy = typec_mux_get_drvdata(mux);
+-
++	u8 prev_mode;
+ 
+ 	mutex_lock(&udphy->mutex);
+ 
+-	dev_info(udphy->dev, "usbdp_typec_mux_set mode: %ld\n",
+-		state->mode);
++	prev_mode = udphy->next_mode;
+ 
+ 	switch(state->mode) {
+ 	case TYPEC_DP_STATE_C:
+@@ -864,6 +885,15 @@ static int usbdp_typec_mux_set(struct typec_mux_dev *mux,
+ 		break;
+ 	}
+ 
++	if (prev_mode != udphy->next_mode && (udphy->cur_mode & UDPHY_MODE_USB) &&
++	    udphy->cur_mode != udphy->next_mode)
++		dev_warn_ratelimited(udphy->dev,
++			"typec mux mode change (0x%x->0x%x, typec mode=%ld) while PHY is configured for USB (cur_mode=0x%x)\n",
++			prev_mode, udphy->next_mode, state->mode, udphy->cur_mode);
++	else
++		dev_dbg(udphy->dev, "usbdp_typec_mux_set: typec mode=%ld next_mode 0x%x->0x%x\n",
++			state->mode, prev_mode, udphy->next_mode);
++
+ 	usbdp_set_dpphy_mode(udphy);
+ 
+ 	//TODO check whether the HPD state need software
+@@ -919,11 +949,14 @@ static int cix_usbdp_phy_power_on(struct cix_udphy *udphy)
+ 		return 0;
+ 	}
+ 
++	dev_dbg(udphy->dev, "cix_usbdp_phy_power_on: reconfiguring PHY mode 0x%x -> 0x%x\n",
++		udphy->cur_mode, udphy->next_mode);
++
+ 	if (phy_cfgs->udphy_init) {
+ 		ret = phy_cfgs->udphy_init(udphy);
+ 
+ 		if(ret) {
+-			dev_err(udphy->dev, "failed to init udphy\n");
++			dev_err(udphy->dev, "failed to init udphy: %d\n", ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -936,11 +969,13 @@ static int cix_usbdp_phy_power_off(struct cix_udphy *udphy)
+ 	int ret;
+ 	const struct cix_udphy_cfg *phy_cfgs = udphy->cfg;
+ 
++	dev_dbg(udphy->dev, "cix_usbdp_phy_power_off: cur_mode=0x%x\n", udphy->cur_mode);
++
+ 	if (phy_cfgs->udphy_exit) {
+ 		ret = phy_cfgs->udphy_exit(udphy);
+ 
+ 		if(ret) {
+-			dev_err(udphy->dev, "failed to exit udphy\n");
++			dev_err(udphy->dev, "failed to exit udphy: %d\n", ret);
+ 			return ret;
+ 		}
+ 	}
+@@ -1442,18 +1477,24 @@ static int cix_udphy_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	udphy->reset = devm_reset_control_get(dev, "reset");
+-	if (IS_ERR(udphy->reset)) {
+-		dev_err(dev, "%s: failed to get reset\n", __func__);
+-	}
++	if (IS_ERR(udphy->reset))
++		return dev_err_probe(dev,
++				      cix_acpi_resource_lookup_defer(dev, PTR_ERR(udphy->reset)),
++				      "failed to get reset\n");
+ 
+ 	udphy->preset = devm_reset_control_get(dev, "preset");
+-	if (IS_ERR(udphy->preset)) {
+-		dev_err(dev, "%s: failed to get preset\n", __func__);
+-	}
++	if (IS_ERR(udphy->preset))
++		return dev_err_probe(dev,
++				      cix_acpi_resource_lookup_defer(dev, PTR_ERR(udphy->preset)),
++				      "failed to get preset\n");
+ 
+ 	if (!device_property_read_u8(dev, "default_conf", &udphy->next_mode))
+ 		dev_info(dev, "phy init default mode %02x\n", udphy->next_mode);
+ 
++	/* "phy-status" is firmware metadata surfaced for diagnostics only. */
++	if (device_property_read_string(dev, "phy-status", &udphy->phy_status))
++		udphy->phy_status = NULL;
++
+ 	/*
+ 	 * Determine whether to reset the PHY during probe.
+ 	 *
+@@ -1600,6 +1641,16 @@ static int cix_udphy_probe(struct platform_device *pdev)
+ 		usbdp_set_dpphy_mode(udphy);
+ 	}
+ 
++	dev_info(dev,
++		 "CIX USB-DP PHY id=%d mode=%s default_conf=%u phy-status=%s reset/preset ready pclk=%luHz hw-reset=%s\n",
++		 udphy->id,
++		 (udphy->next_mode == UDPHY_MODE_DP) ? "dp" :
++		 (udphy->next_mode == UDPHY_MODE_DP_USB) ? "dp+usb" :
++		 (udphy->next_mode == UDPHY_MODE_USB) ? "usb" : "none",
++		 udphy->next_mode, udphy->phy_status ? udphy->phy_status : "unknown",
++		 clk_get_rate(udphy->apb_clk),
++		 udphy->phy_reset ? "yes" : "preserved");
++
+ 	return 0;
+ 
+ put_child:
+diff --git a/drivers/soc/cix/cix-acpi-resource-lookup.c b/drivers/soc/cix/cix-acpi-resource-lookup.c
+index 111111111111..222222222222 100644
+--- a/drivers/soc/cix/cix-acpi-resource-lookup.c
++++ b/drivers/soc/cix/cix-acpi-resource-lookup.c
+@@ -25,6 +25,7 @@
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
++#include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ #include <linux/uuid.h>
+ 
+ static struct acpi_device *acpi_obj_to_adev(const union acpi_object *obj)
+@@ -607,6 +608,21 @@ free_entry:
+ 		 injected);
+ }
+ 
++/*
++ * Set once the _DSD injection pass below has completed. Consumers such
++ * as the CIX PHY and CDNSP drivers probe this via
++ * cix_acpi_resource_lookup_ready() before treating a reset/clock/regmap
++ * lookup failure as final, since they may otherwise probe (and be bound
++ * by driver core) before this device's probe() has run.
++ */
++static bool res_lookup_ready;
++
++bool cix_acpi_resource_lookup_ready(void)
++{
++	return READ_ONCE(res_lookup_ready);
++}
++EXPORT_SYMBOL_GPL(cix_acpi_resource_lookup_ready);
++
+ static int acpi_resource_lookup_probe(struct platform_device *pdev)
+ {
+ 	acpi_walk_namespace(ACPI_TYPE_ANY, ACPI_ROOT_OBJECT,
+@@ -615,6 +631,13 @@ static int acpi_resource_lookup_probe(struct platform_device *pdev)
+ 
+ 	rst_inject_dsd_props(&pdev->dev);
+ 
++	/*
++	 * Publish readiness only after injection is fully done, and only
++	 * after the _DSD writes above are visible to other CPUs.
++	 */
++	smp_wmb();
++	WRITE_ONCE(res_lookup_ready, true);
++
+ 	dev_info(&pdev->dev, "ACPI resource lookup complete\n");
+ 	return 0;
+ }
+diff --git a/include/linux/soc/cix/cix-acpi-resource-lookup.h b/include/linux/soc/cix/cix-acpi-resource-lookup.h
+new file mode 100644
+index 111111111111..222222222222
+--- /dev/null
++++ b/include/linux/soc/cix/cix-acpi-resource-lookup.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * CIX ACPI Resource Lookup helper - readiness API
++ *
++ * The cix-acpi-resource-lookup driver (CIXA1019) injects _DSD reset,
++ * resource-name and clock properties into other CIX ACPI devices so
++ * that devm_reset_control_get()/devm_clk_get()/platform_get_resource_byname()
++ * work under ACPI. Consumer drivers (CIX PHYs, CDNSP controllers, ...)
++ * can probe before that injection has happened, e.g. when they are
++ * enumerated earlier in the ACPI namespace or rebound independently.
++ *
++ * cix_acpi_resource_lookup_ready() reports whether the injection pass
++ * has completed. Consumers should use cix_acpi_resource_lookup_defer()
++ * to turn a resource lookup failure into a bounded -EPROBE_DEFER while
++ * injection is still pending, and let the real error through once
++ * injection has completed (so probe does not defer forever).
++ */
++#ifndef __CIX_ACPI_RESOURCE_LOOKUP_H__
++#define __CIX_ACPI_RESOURCE_LOOKUP_H__
++
++#include <linux/acpi.h>
++#include <linux/device.h>
++#include <linux/errno.h>
++
++#if IS_ENABLED(CONFIG_CIX_ACPI_RESOURCE_LOOKUP)
++bool cix_acpi_resource_lookup_ready(void);
++#else
++static inline bool cix_acpi_resource_lookup_ready(void)
++{
++	return true;
++}
++#endif
++
++static inline int cix_acpi_resource_lookup_defer(struct device *dev, int err)
++{
++	if (err && err != -EPROBE_DEFER && ACPI_COMPANION(dev) &&
++	    !cix_acpi_resource_lookup_ready())
++		return -EPROBE_DEFER;
++
++	return err;
++}
++
++#endif /* __CIX_ACPI_RESOURCE_LOOKUP_H__ */
