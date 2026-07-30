@@ -1,0 +1,287 @@
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Subject: [PATCH] soc: cix: add CONFIG_CIX_SKY1_USB umbrella and fix ACPI/role-switch USB Kconfig gaps
+
+The individual Kconfig entries for the MS-R1/Sky1 USB stack do not
+guarantee that every hardware provider the platform actually needs is
+built. In particular, TYPEC_RTS5453 only depends on the generic I2C
+core (CONFIG_I2C), not on the concrete Cadence I2C controller
+(CONFIG_I2C_CADENCE) that MS-R1 actually wires the two RTS5453 PD
+controllers through. A perfectly valid, non-crashing configuration can
+therefore have CONFIG_TYPEC_RTS5453=y and CONFIG_I2C_CADENCE=n at the
+same time, in which case no i2c-3 adapter is ever created and the
+ACPI-described \_SB.I2C7.PD00/PD01 devices can never bind to rts5453h -
+silently, with no build or boot error pointing at the missing option.
+
+Add a single platform umbrella symbol, CONFIG_CIX_SKY1_USB (bool, in
+drivers/soc/cix/Kconfig next to the existing CIX_ACPI_USB_SCAN/
+CIX_ACPI_RESOURCE_LOOKUP platform symbols), that selects every driver
+in the known-required MS-R1 USB dependency chain: I2C + I2C_CADENCE,
+REGMAP + REGMAP_I2C, TYPEC + TYPEC_RTS5453 + USB_ROLE_SWITCH,
+GENERIC_PHY + PHY_CIX_USB2/USB3/USBDP, USB_SUPPORT + USB +
+USB_XHCI_HCD + USB_XHCI_PLATFORM, USB_CDNS_SUPPORT + USB_CDNSP +
+USB_CDNSP_HOST + USB_CDNSP_SKY1, and CIX_ACPI_USB_SCAN. Enabling only
+CONFIG_CIX_SKY1_USB=y from a clean arm64 defconfig has been verified
+(see below) to resolve every one of those symbols to "y", with zero
+`make olddefconfig` unmet-dependency or recursive-dependency warnings.
+
+The umbrella deliberately does *not* select USB-storage-class or
+debugging symbols (USB_STORAGE, USB_UAS, SCSI, BLK_DEV_SD, DEBUG_FS,
+DYNAMIC_DEBUG, PSTORE, ...) or gadget-mode symbols (USB_GADGET,
+USB_CDNSP_GADGET): those are policy/device-class/debugging choices for
+a storage-validation kernel, not Sky1 controller dependencies, and
+remain the integrator's separate choice.
+
+Per-symbol fixes needed to make the umbrella's `select`s actually
+resolve correctly, and to keep the generic/platform-specific
+dependency split correct (a generic peripheral driver should express
+only its own framework requirements; the concrete platform symbol
+should select the concrete host-controller/PHY providers):
+
+ - TYPEC_RTS5453 (drivers/usb/typec/Kconfig): added explicit
+   `depends on USB_ROLE_SWITCH` and `depends on ACPI || OF`.
+   USB_ROLE_SWITCH was previously not a dependency at all, even though
+   the driver calls fwnode_usb_role_switch_get()/
+   usb_role_switch_set_role()/usb_role_switch_put() directly - with
+   CONFIG_USB_ROLE_SWITCH disabled those resolve to fallback stubs
+   (lookup fails, set-role may report success without touching any
+   hardware), so the driver must not be selectable without the real
+   subsystem, matching how other upstream Type-C drivers that need
+   role switching declare this dependency. I2C_CADENCE is
+   *deliberately not* added here: RTS5453 is a generic peripheral that
+   could sit behind a different I2C host controller on another
+   platform, so the concrete Cadence dependency belongs on
+   CIX_SKY1_USB, not on the peripheral driver itself.
+ - PHY_CIX_USB2 / PHY_CIX_USB3 / PHY_CIX_USBDP (drivers/phy/cix/Kconfig):
+   changed `depends on OF` to `depends on ACPI || OF`. MS-R1 enumerates
+   its USB PHYs entirely through ACPI (CIXH2032/CIXH2033), so a
+   hard OF dependency made these symbols unselectable on this ACPI-only
+   platform; PHY_CIX_PCIE is left untouched as it is out of scope for
+   this USB series and its ACPI enablement has not been verified here.
+ - USB_CDNSP_SKY1 (drivers/usb/cdns3/Kconfig): added
+   `depends on ACPI || OF` and `select GENERIC_PHY`. It was already
+   nested inside `if USB_CDNSP`, so it already could not be enabled
+   without the Cadence CDNSP core; that structural dependency is kept
+   as-is.
+
+Kconfig placement follows the preference order requested for this
+change: the umbrella lives in the existing drivers/soc/cix/Kconfig
+(preference #1), alongside the other CIX platform-level symbols it is
+peer to (CIX_ACPI_RESOURCE_LOOKUP, CIX_ACPI_USB_SCAN), and is not
+nested inside any menu/if block that is unavailable until one of its
+own selected dependencies is already enabled.
+
+No Makefile changes are needed: obj-$(CONFIG_TYPEC_RTS5453),
+obj-$(CONFIG_USB_CDNSP_SKY1), obj-$(CONFIG_PHY_CIX_USB2/USB3/USBDP)
+and obj-$(CONFIG_CIX_ACPI_USB_SCAN) already exist and build the
+correct, already-present source files; this patch only changes
+Kconfig dependency/select relationships, no source files.
+
+Validation performed:
+
+ - `make ARCH=arm64 defconfig`, then `scripts/config --enable ARCH_CIX
+   --enable ACPI --enable CIX_SKY1_USB`, then `make ARCH=arm64
+   olddefconfig`: zero warnings, and CONFIG_I2C, CONFIG_I2C_CADENCE,
+   CONFIG_REGMAP, CONFIG_REGMAP_I2C, CONFIG_TYPEC,
+   CONFIG_TYPEC_RTS5453, CONFIG_USB_ROLE_SWITCH, CONFIG_GENERIC_PHY,
+   CONFIG_PHY_CIX_USB2/USB3/USBDP, CONFIG_USB_SUPPORT, CONFIG_USB,
+   CONFIG_USB_XHCI_HCD, CONFIG_USB_XHCI_PLATFORM,
+   CONFIG_USB_CDNS_SUPPORT, CONFIG_USB_CDNSP, CONFIG_USB_CDNSP_HOST,
+   CONFIG_USB_CDNSP_SKY1 and CONFIG_CIX_ACPI_USB_SCAN all resolved to
+   "y", none left as "m" or unset.
+ - Re-ran `make ARCH=arm64 olddefconfig` against the pre-existing,
+   already-working MS-R1 stability .config (which already has all of
+   the above symbols built in by hand): zero warnings, no change other
+   than CONFIG_CIX_SKY1_USB itself becoming "y".
+ - All existing symbol names were verified directly against this
+   patched 7.1 tree (grep -Rn '^config USB_CDNSP', '^config
+   I2C_CADENCE', '^config PHY_CIX_', '^config .*CIX.*ACPI', and the
+   corresponding Makefiles) rather than assumed; every symbol name
+   used here already matches the tree exactly, so no renaming was
+   required anywhere in this patch.
+
+Follow-up review fixes (this revision):
+
+ - `select CIX_ACPI_RESOURCE_LOOKUP` added. The PHY (phy-cix-usb2/usb3/
+   usbdp) and CDNSP drivers this umbrella selects depend behaviorally
+   on CIX_ACPI_RESOURCE_LOOKUP under ACPI boot: they call
+   cix_acpi_resource_lookup_defer() to distinguish "properties not yet
+   injected, defer probe" from "genuinely missing, fail". The inline
+   stub in that header returns "ready" unconditionally when
+   CONFIG_CIX_ACPI_RESOURCE_LOOKUP=n, which lets everything still
+   compile, but on a real ACPI boot with the option left off, reset/
+   clock/resource-name lookups for CIXH2032/CIXH2033/CIXH2030/... would
+   simply fail outright instead of ever being injected - the umbrella
+   previously only selected CIX_ACPI_USB_SCAN, not this symbol, leaving
+   a real gap between what the umbrella guarantees and what its
+   selected consumers actually require. Help text updated to describe
+   this driver's role alongside the other selects it lists.
+ - `select REGMAP` removed as redundant. drivers/base/regmap/Kconfig's
+   `config REGMAP` is `default y if (REGMAP_I2C || REGMAP_SLIMBUS ||
+   ...)`, so `select REGMAP_I2C` (already present, kept) forces
+   REGMAP=y on its own; explicitly selecting REGMAP as well added no
+   coverage, only unnecessary coupling. Re-verified with
+   `make ARCH=arm64 olddefconfig` after the removal: CONFIG_REGMAP
+   still resolves to "y".
+ - Compile-matrix re-validated after both changes above, each varied
+   independently from a common clean-defconfig baseline with
+   CIX_SKY1_USB enabled: CONFIG_MODULES=n, CONFIG_MODULES=y,
+   CONFIG_COMPILE_TEST=y, CONFIG_ACPI=n (umbrella and its ACPI-only
+   consumers correctly disappear from the config, since CIX_SKY1_USB
+   `depends on ACPI`), and CONFIG_ACPI=n with CONFIG_OF=y (manually
+   enabling PHY_CIX_USB2/USB3/USBDP, TYPEC_RTS5453, and
+   USB_CDNSP_SKY1 individually, confirming the `ACPI || OF` dependency
+   changes above resolve correctly in OF-only mode too). All five runs:
+   zero unmet-dependency or recursive-dependency warnings.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0084000000000000000000000000000000000084
+---
+ drivers/phy/cix/Kconfig   |  6 +++---
+ drivers/soc/cix/Kconfig   | 48 ++++++++++++++++++++++++++++++++++++++++++++++
+ drivers/usb/cdns3/Kconfig |  5 +++++
+ drivers/usb/typec/Kconfig |  8 ++++++++
+ 4 files changed, 64 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/phy/cix/Kconfig b/drivers/phy/cix/Kconfig
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/Kconfig
++++ b/drivers/phy/cix/Kconfig
+@@ -13,7 +13,7 @@ config PHY_CIX_PCIE
+ config PHY_CIX_USB2
+ 	bool "CIX Sky1 USB2 PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	select GENERIC_PHY
+ 	help
+ 	  Enable this to support the USB2 PHY on CIX Sky1 SoCs.
+@@ -21,7 +21,7 @@ config PHY_CIX_USB2
+ config PHY_CIX_USB3
+ 	bool "CIX Sky1 USB3 PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	select GENERIC_PHY
+ 	help
+ 	  Enable this to support the USB3 PHY on CIX Sky1 SoCs.
+@@ -29,7 +29,7 @@ config PHY_CIX_USB3
+ config PHY_CIX_USBDP
+ 	tristate "CIX Sky1 USB-DP combo PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	depends on TYPEC
+ 	select GENERIC_PHY
+ 	help
+diff --git a/drivers/soc/cix/Kconfig b/drivers/soc/cix/Kconfig
+index 111111111111..222222222222 100644
+--- a/drivers/soc/cix/Kconfig
++++ b/drivers/soc/cix/Kconfig
+@@ -27,3 +27,51 @@ config CIX_ACPI_USB_SCAN
+ 
+ 	  Required for proper USB controller initialization under ACPI boot.
+ 
++config CIX_SKY1_USB
++	bool "CIX Sky1 integrated USB support"
++	depends on ARCH_CIX
++	depends on ACPI
++	depends on HAS_DMA
++
++	select I2C
++	select I2C_CADENCE
++
++	select REGMAP_I2C
++
++	select TYPEC
++	select TYPEC_RTS5453
++	select USB_ROLE_SWITCH
++
++	select GENERIC_PHY
++	select PHY_CIX_USB2
++	select PHY_CIX_USB3
++	select PHY_CIX_USBDP
++
++	select USB_SUPPORT
++	select USB
++	select USB_XHCI_HCD
++	select USB_XHCI_PLATFORM
++
++	select USB_CDNS_SUPPORT
++	select USB_CDNSP
++	select USB_CDNSP_HOST
++	select USB_CDNSP_SKY1
++
++	select CIX_ACPI_USB_SCAN
++	select CIX_ACPI_RESOURCE_LOOKUP
++
++	help
++	  Enable the complete USB subsystem required by CIX Sky1 systems,
++	  including the Minisforum MS-R1.
++
++	  This selects the Cadence I2C controller used by the RTS5453
++	  Type-C PD controllers, the RTS5453 driver, the CIX USB PHYs,
++	  the CIX CDNSP platform wrapper, the Cadence CDNSP host
++	  controller, xHCI host support, USB role-switch support, the
++	  CIX ACPI USB enumeration workaround, and the CIX ACPI resource
++	  lookup driver that injects the reset/clock/resource-name _DSD
++	  properties the PHY and CDNSP drivers need under ACPI boot.
++
++	  For systems that boot or mount storage from USB, this option
++	  should be built into the kernel.
++
+diff --git a/drivers/usb/cdns3/Kconfig b/drivers/usb/cdns3/Kconfig
+index 111111111111..222222222222 100644
+--- a/drivers/usb/cdns3/Kconfig
++++ b/drivers/usb/cdns3/Kconfig
+@@ -149,6 +149,8 @@ if USB_CDNSP
+ config USB_CDNSP_SKY1
+ 	tristate "Cadence USBSSP support on CIX Sky1 SoC platforms"
+ 	depends on ARCH_CIX || COMPILE_TEST
++	depends on ACPI || OF
++	select GENERIC_PHY
+ 	default USB_CDNSP
+ 	help
+ 	  Say 'Y' or 'M' here if you are building for CIX Sky1 SoCs
+@@ -156,6 +158,9 @@ config USB_CDNSP_SKY1
+ 
+ 	  e.g. Sky1 (Orion O6).
+ 
++	  This driver connects the Cadence CDNSP core to the CIX clocks,
++	  resets, PHYs, ACPI resources, and USB role-switch infrastructure.
++
+ 	  If you choose to build this driver as module it will
+ 	  be dynamically linked and module will be called cdnsp-sky1.ko
+ 
+diff --git a/drivers/usb/typec/Kconfig b/drivers/usb/typec/Kconfig
+index 111111111111..222222222222 100644
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -114,12 +114,28 @@ config TYPEC_RTS5453
+ 	tristate "Realtek RTS5453 Type-C PD controller driver"
+ 	depends on I2C
+ 	depends on TYPEC
++	depends on USB_ROLE_SWITCH
++	depends on ACPI || OF
+ 	select REGMAP_I2C
++	select I2C_SMBUS
+ 	help
+ 	  Say Y or M here if your system has a Realtek RTS5453H USB Type-C
+ 	  Power Delivery controller. This controller handles USB PD negotiation,
+ 	  USB role switching, and DisplayPort alternate mode for Type-C ports.
+ 
++	  The controller is accessed over I2C and reports connector state
++	  through the Linux Type-C, mux, and USB role-switch frameworks, so
++	  USB_ROLE_SWITCH is a hard dependency: without it, role-switch
++	  lookup/set calls made by this driver either fail outright or hit
++	  stub implementations that do not control any real hardware.
++
++	  I2C_SMBUS is selected because the shared-IRQ ARA (Alert Response
++	  Address) client this driver creates via
++	  i2c_new_smbus_alert_device() is serviced by the smbus_alert
++	  driver; leaving it as an optional module means the shared
++	  SMBALERT# line can go unserviced for an arbitrary boot-time
++	  window until userspace loads it.
++
+ 	  If you choose to build this driver as a dynamically linked module, the
+ 	  module will be called rts5453.ko.
+ 
