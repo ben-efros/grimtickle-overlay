@@ -1,0 +1,9 @@
+# Additional Jellyfin server arguments.
+jellyfin_args=""
+
+jellyfin_data_dir="/var/lib/jellyfin"
+jellyfin_config_dir="/etc/jellyfin"
+jellyfin_cache_dir="/var/cache/jellyfin"
+jellyfin_log_dir="/var/log/jellyfin"
+jellyfin_web_dir="/usr/share/jellyfin/web"
+jellyfin_ffmpeg="/usr/bin/ffmpeg"

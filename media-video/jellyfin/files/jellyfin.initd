@@ -1,0 +1,66 @@
+#!/sbin/openrc-run
+
+description="Jellyfin Media Server"
+
+command="/usr/lib/jellyfin/jellyfin"
+command_user="jellyfin:jellyfin"
+command_background="yes"
+
+directory="/var/lib/jellyfin"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+output_log="/var/log/jellyfin/stdout.log"
+error_log="/var/log/jellyfin/stderr.log"
+
+retry="TERM/30/KILL/5"
+umask="0002"
+
+jellyfin_data_dir="/var/lib/jellyfin"
+jellyfin_config_dir="/etc/jellyfin"
+jellyfin_cache_dir="/var/cache/jellyfin"
+jellyfin_log_dir="/var/log/jellyfin"
+jellyfin_web_dir="/usr/share/jellyfin/web"
+jellyfin_ffmpeg="/usr/bin/ffmpeg"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    local path
+
+    for path in \
+        "${jellyfin_data_dir}" \
+        "${jellyfin_config_dir}" \
+        "${jellyfin_cache_dir}" \
+        "${jellyfin_log_dir}"
+    do
+        checkpath \
+            --directory \
+            --owner jellyfin:jellyfin \
+            --mode 0750 \
+            "${path}" ||
+            return 1
+    done
+
+    [[ -f "${jellyfin_web_dir}/index.html" ]] || {
+        eerror "Jellyfin Web is missing from ${jellyfin_web_dir}"
+        return 1
+    }
+
+    [[ -x "${jellyfin_ffmpeg}" ]] || {
+        eerror "FFmpeg is missing: ${jellyfin_ffmpeg}"
+        return 1
+    }
+
+    command_args="
+        --datadir=${jellyfin_data_dir}
+        --configdir=${jellyfin_config_dir}
+        --cachedir=${jellyfin_cache_dir}
+        --logdir=${jellyfin_log_dir}
+        --webdir=${jellyfin_web_dir}
+        --ffmpeg=${jellyfin_ffmpeg}
+        ${jellyfin_args}
+    "
+}

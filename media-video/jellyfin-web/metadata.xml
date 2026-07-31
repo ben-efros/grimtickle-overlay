@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+
+<pkgmetadata>
+  <use>
+    <flag name="system-fonts">
+      Build the client to prefer fonts supplied by the operating system.
+    </flag>
+  </use>
+
+  <longdescription lang="en">
+    Browser-based user interface for the Jellyfin media server.
+  </longdescription>
+
+  <upstream>
+    <remote-id type="github">jellyfin/jellyfin-web</remote-id>
+    <bugs-to>https://github.com/jellyfin/jellyfin-web/issues</bugs-to>
+  </upstream>
+</pkgmetadata>

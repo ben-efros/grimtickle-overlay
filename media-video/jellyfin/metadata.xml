@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+
+<pkgmetadata>
+  <use>
+    <flag name="debug">
+      Build Jellyfin with portable debugging symbols.
+    </flag>
+  </use>
+
+  <longdescription lang="en">
+    Jellyfin is a free software media server for organizing, managing,
+    transcoding, and streaming audiovisual media.
+  </longdescription>
+
+  <upstream>
+    <remote-id type="github">jellyfin/jellyfin</remote-id>
+    <bugs-to>https://github.com/jellyfin/jellyfin/issues</bugs-to>
+    <doc>https://jellyfin.org/docs/</doc>
+  </upstream>
+</pkgmetadata>

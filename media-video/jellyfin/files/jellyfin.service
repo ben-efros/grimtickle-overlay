@@ -1,0 +1,55 @@
+[Unit]
+Description=Jellyfin Media Server
+Documentation=https://jellyfin.org/docs/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=jellyfin
+Group=jellyfin
+
+EnvironmentFile=-/etc/jellyfin/jellyfin.env
+
+WorkingDirectory=/var/lib/jellyfin
+
+ExecStart=/usr/lib/jellyfin/jellyfin \
+    --datadir=${JELLYFIN_DATA_DIR} \
+    --configdir=${JELLYFIN_CONFIG_DIR} \
+    --cachedir=${JELLYFIN_CACHE_DIR} \
+    --logdir=${JELLYFIN_LOG_DIR} \
+    --webdir=${JELLYFIN_WEB_DIR} \
+    --ffmpeg=${JELLYFIN_FFMPEG}
+
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+UMask=0002
+LimitNOFILE=1048576
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+ReadWritePaths=
+ReadWritePaths=/var/lib/jellyfin
+ReadWritePaths=/var/cache/jellyfin
+ReadWritePaths=/var/log/jellyfin
+ReadWritePaths=/etc/jellyfin
+
+# Jellyfin needs access to GPU/video devices for hardware transcoding.
+DevicePolicy=closed
+DeviceAllow=/dev/dri/renderD128 rw
+DeviceAllow=/dev/dri/renderD129 rw
+DeviceAllow=/dev/dri/card0 rw
+DeviceAllow=/dev/dri/card1 rw
+DeviceAllow=/dev/dri/card2 rw
+
+[Install]
+WantedBy=multi-user.target
