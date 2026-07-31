@@ -1,0 +1,2 @@
+# Sonarr application data and configuration directory.
+sonarr_data_dir="/var/lib/sonarr"

@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+
+description="Sonarr TV series manager"
+
+command="/opt/sonarr/Sonarr"
+command_args="-nobrowser -data=${sonarr_data_dir}"
+command_user="sonarr:sonarr"
+command_background="yes"
+
+directory="/opt/sonarr"
+
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/sonarr/sonarr.log"
+error_log="/var/log/sonarr/sonarr-error.log"
+
+retry="TERM/20/KILL/5"
+umask="0002"
+
+depend() {
+    need net
+    after firewall
+}
+
+start_pre() {
+    checkpath \
+        --directory \
+        --owner sonarr:sonarr \
+        --mode 0750 \
+        "${sonarr_data_dir}" ||
+        return 1
+
+    checkpath \
+        --directory \
+        --owner sonarr:sonarr \
+        --mode 0750 \
+        /var/log/sonarr ||
+        return 1
+}

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+
+<pkgmetadata>
+  <longdescription lang="en">
+    Sonarr is a television series collection manager for Usenet and
+    BitTorrent users. It monitors feeds, searches indexers, sends downloads
+    to supported clients, imports completed downloads, and manages media
+    libraries.
+  </longdescription>
+
+  <upstream>
+    <remote-id type="github">Sonarr/Sonarr</remote-id>
+    <bugs-to>https://github.com/Sonarr/Sonarr/issues</bugs-to>
+    <changelog>https://github.com/Sonarr/Sonarr/commits/v5-develop</changelog>
+    <doc>https://wiki.servarr.com/sonarr</doc>
+  </upstream>
+</pkgmetadata>
