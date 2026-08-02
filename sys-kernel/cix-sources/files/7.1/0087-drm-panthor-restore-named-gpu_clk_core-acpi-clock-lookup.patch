@@ -1,0 +1,93 @@
+From: Ben Efros
+Date: Sat, 01 Aug 2026 23:08:00 -0700
+Subject: drm/panthor: restore named "gpu_clk_core" ACPI clock lookup for CIX Sky1
+
+On the MS-R1 (CIX Sky1 / CIXH5000 GPU, ACPI boot), panthor's probe()
+was failing outright:
+
+    panthor CIXH5000:00: error -ENOENT: get 'core' clock failed
+    panthor CIXH5000:00: probe with driver panthor failed with error -2
+
+No /dev/dri/renderD* node was ever created, so nothing downstream
+(Mesa PanVK, Vulkan, llama.cpp) had any chance of using the GPU.
+
+Root cause: the vendor DSDT's ACPI GPU device (_HID "CIXH5000") only
+registers *named* clkdev lookups for the GPU clocks via its CLKT
+package, consumed by drivers/clk/cix/clk-sky1-acpi.c:
+
+    Package (3) { 0x1F,   "gpu_clk_core",   GPU }
+    Package (3) { 0x20,   "gpu_clk_stacks", GPU }
+    Package (3) { 0x0110, "gpu_clk_200M",   GPU }
+    Package (3) { 0x1E,   "gpu_clk_400M",   GPU }
+
+but panthor_clk_init() in this tree only looked up the *unnamed*
+default clock:
+
+    ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
+
+which does not exist for this ACPI consumer, hence -ENOENT.
+
+This fallback (try "gpu_clk_core" by name first, then fall back to
+the unnamed lookup for DT platforms) was present in the original CIX
+upstream ACPI-support patch
+(0011-drm-panthor-add-acpi-support-for-cix-p1.patch, see
+cix-linux-main patches-7.1/patches-7.0/patches-6.18), but was
+inadvertently dropped from this tree's rebased copy of that same
+patch while adapting it around the unrelated upstream Panthor header
+split / gpu_read() signature changes that landed between kernel
+7.1.2 and 7.1.5. No functional change was intended by that rebase
+for clock lookup; this restores the original behavior.
+
+Verified on-device: after rebuilding and reloading the panthor module
+with this fix, probe succeeds cleanly:
+
+    panthor CIXH5000:00: GPU power domain 21 powered on via SMC SCMI
+    panthor CIXH5000:00: [drm] Mali-G720-Immortalis id 0xc870 major 0x0 minor 0x0 status 0x8
+    panthor CIXH5000:00: [drm] Using ACE-Lite bus coherency (Sky1)
+    panthor CIXH5000:00: [drm] CSF FW using interface v3.13.0, ...
+    [drm] Initialized panthor 1.8.0 for CIXH5000:00 on minor 0
+
+/dev/dri/renderD128 is created, owned by the panthor driver
+(readlink -f /sys/class/drm/renderD128/device/driver ->
+/sys/bus/platform/drivers/panthor), and passes a standalone DRM
+ioctl smoke test (open + drmGetNodeTypeFromFd == DRM_NODE_RENDER +
+drmGetVersion name == "panthor" + drmGetCap(DRM_CAP_PRIME) with both
+import and export support) added at
+vulkan/tests/test_render_node.c in the llama.cpp/Vulkan enablement
+project this patch was produced for.
+
+---
+ drivers/gpu/drm/panthor/panthor_device.c | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+--- a/drivers/gpu/drm/panthor/panthor_device.c
++++ b/drivers/gpu/drm/panthor/panthor_device.c
+@@ -177,11 +177,26 @@
+
+ static int panthor_clk_init(struct panthor_device *ptdev)
+ {
+-	ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
++	/*
++	 * On CIX Sky1 ACPI platforms, the vendor DSDT exposes the GPU core
++	 * clock under the named clkdev lookup "gpu_clk_core" (see the CLKT
++	 * package on the ACPI GPU device), not as an unnamed/default clock.
++	 * Try the named lookup first and fall back to the unnamed lookup for
++	 * DT-based platforms that still register an unnamed core clock.
++	 */
++	ptdev->clks.core = devm_clk_get_optional(ptdev->base.dev, "gpu_clk_core");
+ 	if (IS_ERR(ptdev->clks.core))
+ 		return dev_err_probe(ptdev->base.dev,
+ 				     PTR_ERR(ptdev->clks.core),
+-				     "get 'core' clock failed");
++				     "get 'gpu_clk_core' clock failed");
++
++	if (!ptdev->clks.core) {
++		ptdev->clks.core = devm_clk_get(ptdev->base.dev, NULL);
++		if (IS_ERR(ptdev->clks.core))
++			return dev_err_probe(ptdev->base.dev,
++					     PTR_ERR(ptdev->clks.core),
++					     "get 'core' clock failed");
++	}
+
+ 	ptdev->clks.stacks = devm_clk_get_optional(ptdev->base.dev, "stacks");
+ 	if (IS_ERR(ptdev->clks.stacks))
