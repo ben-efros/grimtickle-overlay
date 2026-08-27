@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<maintainer type="person">
+		<email>ben-efros@users.noreply.github.com</email>
+		<name>Ben Efros</name>
+	</maintainer>
+	<longdescription>
+		rebar-sources provides the Gentoo kernel sources plus additional
+		out-of-tree PCI patches that make the kernel's "pci=realloc=on"
+		boot option able to reallocate resources behind PCI bridges whose
+		own BARs would otherwise pin an upstream prefetchable window in
+		place. This is required to get Resizable BAR / large BAR
+		relocation working for devices such as Intel Arc GPUs on
+		platforms (e.g. Lenovo P920, Intel C621 chipset) whose firmware
+		does not natively enable Resizable BAR.
+	</longdescription>
+</pkgmetadata>
