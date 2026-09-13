@@ -1,0 +1,4 @@
+# Workaround for gperftools/libtcmalloc + libunwind crash on aarch64.
+# ceph-osd segfaults in _ULaarch64_step when tcmalloc captures stack
+# traces via libunwind. Use GCC's unwinder instead.
+TCMALLOC_STACKTRACE_METHOD=libgcc
