@@ -82,7 +82,7 @@ Add this:
     [grimtickle-overlay]
     location = /var/db/repos/grimtickle-overlay
     sync-type = git
-    sync-uri = https://github.com/benefros/grimtickle-overlay.git
+    sync-uri = https://github.com/ben-efros/grimtickle-overlay.git
     auto-sync = yes
 
 Then sync it:
