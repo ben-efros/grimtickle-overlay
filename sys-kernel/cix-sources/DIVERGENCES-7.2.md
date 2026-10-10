@@ -65,22 +65,42 @@ conflict.
 > header. **Not taken here** — it is a policy decision about carrying vendor rewrites of
 > DRM core.
 
-## 2. Rebased onto 7.2.9 (context drift only)
+## 2. Rebased onto 7.2.9 (context drift)
 
 Each was applied at fuzz, regenerated with `git diff`, and re-verified at `-F0`.
-No semantic change was made to any of them.
 
 | Patch | Failing file | What drifted |
 |---|---|---|
 | `0012-irqchip-add-cix-sky1-pdc-driver.patch` | `drivers/irqchip/Makefile` | new entries above the insertion point |
 | `0013-DPTSW-26459-sound-hda-rework-cix-ipbloq-based-on-mai.patch` | `sound/hda/codecs/realtek/alc269.c` | quirk-table churn |
 | `0033-regulator-add-acpi-support.patch` | `drivers/regulator/core.c` | unrelated upstream rework in a disjoint region |
-| `0054-usb-cdns3-fix-TypeC-hotplug-enumerati-on-failure.patch` | `drivers/usb/cdns3/core.c` | 7.2 cdns3 unification |
 | `0070-DPTSW-26437-iommu-arm-smmu-v3-fix-IRQ-setup-on-resum.patch` | `drivers/iommu/arm/arm-smmu-v3/arm-smmu-v3.c` | v7.2.6+ replaced `if (ret) goto err_disable;` with `if (ret) { arm_smmu_device_disable(smmu); return ret; }` — the exact drift predicted in the plan |
 | `0071-DPTSW-26459-ALSA-hda-realtek-suppress-auto-mic-on-CI.patch` | `sound/hda/codecs/realtek/alc269.c` | same region as `0013` |
 
-Note `0013` and `0071` both touch `alc269.c` and both had to be rebased; `0013` is applied
-first (glob order) and `0071` stacks on it. Verified in that order.
+`0054` was rebased here too but has since been removed with the rest of the vendor USB chain.
+
+Note `0013` and `0071` both touch `alc269.c`, and `0071` stacks on `0013` (glob order); they
+must be verified in that order.
+
+## 2b. Compile-time fixes — patches that applied cleanly but produced broken C
+
+Fuzz-rebasing preserves a patch's *intent* but not its *syntax*: shifting context can land
+added lines next to the wrong brace. Three defects only the compiler caught, now fixed **in
+the patch files** (not by editing the generated tree):
+
+| Patch | Symptom | Cause / fix |
+|---|---|---|
+| `0052-add-thermal-IPA-support.patch` | `drivers/acpi/thermal.c:991: label 'free_memory' used but not defined` | 7.2.9 refactored `acpi_thermal_probe()` to `devm_add_action_or_reset()` cleanup and deleted the `free_memory:` label. Changed the added `goto free_memory;` to `return result;` — devm frees `tz` on any return. |
+| `0013-…sound-hda-rework…` | `alc269.c:6758: expected identifier or '(' before '[' token` | Rebasing left a **duplicate** `},` that closed `alc269_fixups[]` early, orphaning every CIX entry. Removed the duplicate and corrected the hunk count. |
+| `0071-…ALSA-hda-realtek…` | same array, `alc269_fixups[]` never closed | Rebasing **dropped** the `},` closing the new `ALC256_FIXUP_CIX_SKY1_NO_AUTO_MIC` entry. Restored it and corrected the hunk count. |
+
+Both `alc269.c` defects were in the same array and had to be fixed together; after the fixes
+`alc269_fixups[]` is well-formed (brace-balanced from its declaration to its `};`).
+
+**Proactive sweep.** Because these were found only by compiling, the whole 7.2.9 series was
+then swept: 270 touched files checked for (a) `goto` to undefined labels and (b) unbalanced
+braces with comments/strings stripped. Result: **0 dangling gotos, 0 real brace defects**
+(the single flag, `pci-sky1-cix.c`, is a legitimate `#if/#else` with a `{` in each branch).
 
 ## 3. `0088` — new patch, regenerated
 

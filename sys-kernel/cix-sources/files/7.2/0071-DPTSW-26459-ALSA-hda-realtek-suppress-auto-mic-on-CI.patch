@@ -86,7 +86,7 @@ index f2e619e..58d7eea 100644
  	},
  	[ALC269_FIXUP_CIX_SKY1_ORAPI_6P] = {
  		.type = HDA_FIXUP_PINS,
-@@ -6867,7 +6891,13 @@ static const struct hda_fixup alc269_fixups[] = {
+@@ -6867,7 +6891,14 @@ static const struct hda_fixup alc269_fixups[] = {
  			{ 0x0d, AC_VERB_SET_AMP_GAIN_MUTE, 0x7080 },
  			{ 0x03, AC_VERB_SET_CHANNEL_STREAMID, 0x10 },
  			{ }
@@ -98,6 +98,7 @@ index f2e619e..58d7eea 100644
 +	[ALC256_FIXUP_CIX_SKY1_NO_AUTO_MIC] = {
 +		.type = HDA_FIXUP_FUNC,
 +		.v.func = alc256_fixup_cix_sky1_no_auto_mic
++	},
  	[ALC256_FIXUP_CHROME_BOOK] = {
  		.type = HDA_FIXUP_FUNC,
  		.v.func = alc256_fixup_chromebook,
