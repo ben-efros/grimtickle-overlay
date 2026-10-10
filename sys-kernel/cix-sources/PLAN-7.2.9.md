@@ -44,7 +44,9 @@ same vendor base (`cixtech/cix-linux-main` `patches-7.1`, pinned at
 
 - `sys-kernel/cix-sources/cix-sources-7.2.9.ebuild` (931 lines; also 7.2.7, 7.2.8, 6.18.54/55)
 - `files/7.2.x/` — 88 audited patches, replacing vendor ordinals by name
-- `files/` top level — 57 ordered post-vendor patches (`20050`…`90098`)
+- `files/` top level — 54 `.patch` files (50 numbered `20050`…`90098`) plus ASL and Kconfig
+  tooling; the ordered `post_vendor_patches` array holds 97 active entries drawn from both
+  `files/` and `files/7.2.x/`
 - `files/acpi-table-upgrade/` — 28 SSDT/DSDT/IORT ASL sources
 - It answers task A4 directly: `K_WANT_GENPATCHES="base extras experimental"`,
   `K_GENPATCHES_VER="10"`, `K_NO_VERSION_CHECK=0`, `KEYWORDS="arm arm64"`.
