@@ -85,10 +85,10 @@ property, which is why 0078 moved away from it. Kept as a documented
 fallback, not the primary path.
 
 diff --git a/drivers/usb/typec/rts5453.c b/drivers/usb/typec/rts5453.c
-index e5de1fb..3a8ae90 100644
+index e5de1fb..6397eaf 100644
 --- a/drivers/usb/typec/rts5453.c
 +++ b/drivers/usb/typec/rts5453.c
-@@ -129,6 +129,19 @@ struct rts5453_irq_group {
+@@ -129,6 +129,20 @@ struct rts5453_irq_group {
  	unsigned int wake_depth;
  
  	struct dentry *debugfs_dir;
@@ -102,13 +102,14 @@ index e5de1fb..3a8ae90 100644
 +	bool guard_irq;
 +	bool storm_masked;
 +	unsigned int no_progress;
++	unsigned long storm_last;
 +	atomic64_t direct_services;
 +	atomic64_t storm_breaks;
 +	struct delayed_work storm_rearm_work;
  };
  
  static LIST_HEAD(rts5453_irq_groups);
-@@ -921,6 +934,89 @@ static void rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
+@@ -921,6 +935,104 @@ static void rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
  	mutex_unlock(&group->pm_lock);
  }
  
@@ -122,6 +123,8 @@ index e5de1fb..3a8ae90 100644
 + */
 +#define RTS5453_STORM_NO_PROGRESS_MAX	8
 +#define RTS5453_STORM_REARM_MS		5000
++/* Interrupts closer together than this are treated as one burst. */
++#define RTS5453_STORM_WINDOW_MS		100
 +
 +/*
 + * Ack every online member of the group. rts5453_capture_and_clear_alert()
@@ -173,6 +176,19 @@ index e5de1fb..3a8ae90 100644
 +
 +	rts5453_group_service_members(group);
 +
++	/*
++	 * Only interrupts arriving in a tight burst count as storm evidence:
++	 * a genuinely stuck level-triggered line fires thousands of times per
++	 * second, whereas normal PD events are widely spaced. Resetting on the
++	 * gap keeps this a "consecutive" detector; without it the counter was
++	 * cumulative and every 8th interrupt masked the shared IRQ for
++	 * RTS5453_STORM_REARM_MS, silently dropping Type-C/PD events.
++	 */
++	if (time_after(jiffies,
++		       group->storm_last + msecs_to_jiffies(RTS5453_STORM_WINDOW_MS)))
++		group->no_progress = 0;
++	group->storm_last = jiffies;
++
 +	if (++group->no_progress < RTS5453_STORM_NO_PROGRESS_MAX)
 +		return IRQ_HANDLED;
 +
@@ -198,7 +214,7 @@ index e5de1fb..3a8ae90 100644
  static ssize_t disable_pd_interrupt_show(struct device *dev,
  		struct device_attribute *attr,
  		char *buf)
-@@ -1041,6 +1137,28 @@ static int rts5453_group_start(struct rts5453_irq_group *group)
+@@ -1041,6 +1153,28 @@ static int rts5453_group_start(struct rts5453_irq_group *group)
  		return ret;
  	}
  
@@ -227,7 +243,7 @@ index e5de1fb..3a8ae90 100644
  	return 0;
  }
  
-@@ -1079,6 +1197,11 @@ static int rts5453_group_counters_show(struct seq_file *s, void *unused)
+@@ -1079,6 +1213,11 @@ static int rts5453_group_counters_show(struct seq_file *s, void *unused)
  	seq_printf(s, "irq_disable_depth=%u wake_depth=%u\n",
  		   group->irq_disable_depth, group->wake_depth);
  	mutex_unlock(&group->pm_lock);
@@ -239,7 +255,7 @@ index e5de1fb..3a8ae90 100644
  	return 0;
  }
  DEFINE_SHOW_ATTRIBUTE(rts5453_group_counters);
-@@ -1157,6 +1280,8 @@ static int rts5453_group_join(struct rts5453h *rts)
+@@ -1157,6 +1296,8 @@ static int rts5453_group_join(struct rts5453h *rts)
  		INIT_LIST_HEAD(&group->members);
  		mutex_init(&group->members_lock);
  		mutex_init(&group->pm_lock);
@@ -248,7 +264,7 @@ index e5de1fb..3a8ae90 100644
  		refcount_set(&group->refs, 1);
  		group->adapter = client->adapter;
  		group->irq = client->irq;
-@@ -1297,11 +1422,31 @@ static void rts5453_group_leave(struct rts5453h *rts)
+@@ -1297,11 +1438,35 @@ static void rts5453_group_leave(struct rts5453h *rts)
  	 * IRQ, via free_irq(), which itself blocks until any currently
  	 * running instance of the threaded handler completes. No manual
  	 * disable_irq()/synchronize_irq()/free_irq() sequence is needed
@@ -265,11 +281,14 @@ index e5de1fb..3a8ae90 100644
 +	 * freed. Cancel the re-arm first so it cannot enable_irq() after
 +	 * free_irq().
 +	 */
-+	cancel_delayed_work_sync(&group->storm_rearm_work);
 +	if (group->guard_irq) {
 +		/*
-+		 * Re-balance a mask left behind by the storm breaker, or
-+		 * free_irq() would see an unbalanced disable.
++		 * Release the IRQ FIRST: free_irq() synchronises with any
++		 * running handler, so nothing can re-arm the re-arm work
++		 * afterwards. Cancelling the work first left a window in
++		 * which a handler could re-schedule it after the only
++		 * cancel, and it would then fire on the freed group.
++		 * Re-balance a mask left by the storm breaker first.
 +		 */
 +		if (group->storm_masked) {
 +			group->storm_masked = false;
@@ -277,6 +296,7 @@ index e5de1fb..3a8ae90 100644
 +		}
 +		free_irq(group->irq, group);
 +	}
++	cancel_delayed_work_sync(&group->storm_rearm_work);
 +
  	debugfs_remove_recursive(group->debugfs_dir);
  
