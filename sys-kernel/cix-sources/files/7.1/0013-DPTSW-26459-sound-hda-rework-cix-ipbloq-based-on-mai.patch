@@ -14,26 +14,26 @@ Change-Id: I1dd603d5f86e1b1e3bc3b736b7877c9c21673c57
  2 files changed, 366 insertions(+), 6 deletions(-)
 
 diff --git a/sound/hda/codecs/realtek/alc269.c b/sound/hda/codecs/realtek/alc269.c
-index 1e0612c..f2e619e 100644
+index 111111111111..222222222222 100644
 --- a/sound/hda/codecs/realtek/alc269.c
 +++ b/sound/hda/codecs/realtek/alc269.c
 @@ -4155,6 +4155,12 @@ enum {
- 	ALC233_FIXUP_NO_AUDIO_JACK,
- 	ALC256_FIXUP_MIC_NO_PRESENCE_AND_RESUME,
- 	ALC256_FIXUP_XIAOMI_PRO15_RESUME,
+ 	ALC236_FIXUP_HP_DMIC,
+ 	ALC256_FIXUP_HONOR_MRB_XXX_M1020_AUDIO,
+ 	ALC245_FIXUP_HP_ENVY_X360_15_FH0XXX,
 +	ALC256_FIXUP_CIX_SKY1_EVB,
 +	ALC256_FIXUP_CIX_SKY1_EVB_COEF,
 +	ALC256_FIXUP_CIX_SKY1_ORION_O6,
 +	ALC256_FIXUP_CIX_SKY1_ORION_O6_COEF,
 +	ALC269_FIXUP_CIX_SKY1_ORAPI_6P,
 +	ALC269_FIXUP_CIX_SKY1_ORAPI_6P_COEF,
- 	ALC285_FIXUP_LEGION_Y9000X_SPEAKERS,
- 	ALC285_FIXUP_LEGION_Y9000X_AUTOMUTE,
- 	ALC287_FIXUP_LEGION_16ACHG6,
+ };
+ 
+ /* A special fixup for Lenovo C940 and Yoga Duet 7;
 @@ -6727,6 +6733,141 @@ static const struct hda_fixup alc269_fixups[] = {
+ 		.v.func = cs35l41_fixup_i2c_two,
  		.chained = true,
- 		.chain_id = ALC269_FIXUP_THINKPAD_ACPI
- 	},
+ 		.chain_id = ALC245_FIXUP_HP_X360_MUTE_LEDS
 +	},
 +	/* CIX Sky1 boards: model-name matched (cix,model), shared codec SSID. */
 +	[ALC256_FIXUP_CIX_SKY1_EVB] = {
@@ -169,10 +169,10 @@ index 1e0612c..f2e619e 100644
 +			{ 0x03, AC_VERB_SET_CHANNEL_STREAMID, 0x10 },
 +			{ }
 +		}
- 	[ALC256_FIXUP_CHROME_BOOK] = {
- 		.type = HDA_FIXUP_FUNC,
- 		.v.func = alc256_fixup_chromebook,
-@@ -8316,6 +8457,9 @@ static const struct hda_model_fixup alc269_fixup_models[] = {
+ 	}
+ };
+ 
+@@ -8073,6 +8214,9 @@ static const struct hda_model_fixup alc269_fixup_models[] = {
  	{.id = ALC2XX_FIXUP_HEADSET_MIC, .name = "alc2xx-fixup-headset-mic"},
  	{.id = ALC245_FIXUP_BASS_HP_DAC, .name = "alc245-fixup-bass-hp-dac"},
  	{.id = ALC256_FIXUP_HONOR_MRB_XXX_M1020_AUDIO, .name = "alc256-honor-mrb-xxx-m1020-audio"},
@@ -183,7 +183,7 @@ index 1e0612c..f2e619e 100644
  };
  #define ALC225_STANDARD_PINS \
 diff --git a/sound/hda/controllers/cix-ipbloq.c b/sound/hda/controllers/cix-ipbloq.c
-index c1084a9..c109fe1 100644
+index 111111111111..222222222222 100644
 --- a/sound/hda/controllers/cix-ipbloq.c
 +++ b/sound/hda/controllers/cix-ipbloq.c
 @@ -1,7 +1,12 @@
@@ -533,3 +533,6 @@ index c1084a9..c109fe1 100644
  	},
  	.probe = cix_ipbloq_hda_probe,
  	.remove = cix_ipbloq_hda_remove,
+-- 
+Cixtech
+

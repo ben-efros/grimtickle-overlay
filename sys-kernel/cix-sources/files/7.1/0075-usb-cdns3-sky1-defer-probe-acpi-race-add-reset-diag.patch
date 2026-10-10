@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 13:00:00 +0800
+Subject: usb: cdns3: sky1: defer probe on ACPI reset-lookup race, add reset diagnostics
+
+Wire the CDNSP-sky1 wrapper's "usb_reset"/"usb_preset" reset lookups
+through cix_acpi_resource_lookup_defer() (see previous patch) so a
+lookup failure that happens before CIXA1019 has injected its _DSD
+reset properties is treated as -EPROBE_DEFER instead of a permanent
+error, matching the existing PHY-dependency deferral already done in
+cdnsp_sky1_check_phy_deps().
+
+Also adds concise dev_dbg()/dev_info() diagnostics around the
+CIXH2030/CIXH2031 controller reset and reinitialization path
+(cdnsp_sky1_drd_init(), the resume-after-power-loss path in
+cdnsp-plat.c, and the PHY dependency check) so that during an
+instability event the logs make it possible to tell whether a given
+controller reset was driven by probe, by system resume after power
+domain loss, or by a deferred PHY dependency - without dumping
+register state on every occurrence.
+
+Harden cdnsp_sky1_drd_init()'s reset sequencing, since this is the
+function that actually resets and reinitializes the xHCI/Cadence
+controller used by usb14's storage devices, both at probe and on
+resume after power-domain loss:
+
+ * The initial reset_control_assert(data->reset)/assert(data->preset)
+   calls were unchecked. If either fails, the function previously
+   continued to enable clocks and program registers with the
+   controller's reset state unknown. Both are now checked and abort
+   the sequence on failure, before any clock or register state has
+   been touched.
+ * reset_control_deassert(data->preset), which must succeed before the
+   AXI/XEC register programming that follows it can be assumed to
+   reach real hardware, was unchecked. It is now checked; on failure
+   the clocks enabled just before it are disabled and the error is
+   returned, since preset remains asserted (its own default/safe
+   state) and does not need to be re-asserted.
+ * The final reset_control_deassert(data->reset), which is what
+   actually brings the xHCI/Cadence controller out of reset, was
+   unchecked and the function unconditionally returned 0 afterward.
+   This is the change most directly connected to preventing a
+   half-initialized host controller from being handed storage I/O: a
+   failure here previously reported success while the controller
+   remained held in reset. It is now checked; on failure preset is
+   re-asserted and the clocks are disabled, leaving the controller in
+   a fully quiesced, known state, and the real error is returned
+   instead of 0.
+ * cdnsp_controller_resume() in cdnsp-plat.c calls
+   cdns->pdata->platform_reset() (which is cdnsp_sky1_drd_init()) on
+   the power-domain-loss resume path but discarded its return value.
+   Even with the above checks, a resume that silently ignores a
+   platform_reset() failure would still proceed to reinitialize the
+   USB2/USB3 PHYs and resume I/O against a controller that never came
+   out of reset. The return value is now checked and propagated.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0073000000000000000000000000000000000073
+---
+ drivers/usb/cdns3/cdnsp-plat.c |  9 ++++++--
+ drivers/usb/cdns3/cdnsp-sky1.c | 74 +++++++++++++++++++++++++++++++++++++++++++++++++++++--------
+ 2 files changed, 74 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/usb/cdns3/cdnsp-plat.c b/drivers/usb/cdns3/cdnsp-plat.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/cdns3/cdnsp-plat.c
++++ b/drivers/usb/cdns3/cdnsp-plat.c
+@@ -328,8 +328,18 @@ static int cdnsp_controller_resume(struct device *dev, pm_message_t msg)
+ 		 * This does: reset assert, clocks re-enable, AXI/XEC config,
+ 		 * reset deassert - same sequence as probe.
+ 		 */
+-		if (cdns->pdata && cdns->pdata->platform_reset)
+-			cdns->pdata->platform_reset(cdns->dev);
++		dev_info(cdns->dev,
++			 "resume: power domain was lost, reinitializing controller and PHYs\n");
++
++		if (cdns->pdata && cdns->pdata->platform_reset) {
++			ret = cdns->pdata->platform_reset(cdns->dev);
++			if (ret) {
++				dev_err(cdns->dev,
++					"resume: platform_reset failed, controller may still be held in reset: %d\n",
++					ret);
++				return ret;
++			}
++		}
+ 
+ 		phy_exit(cdns->usb2_phy);
+ 		ret = phy_init(cdns->usb2_phy);
+diff --git a/drivers/usb/cdns3/cdnsp-sky1.c b/drivers/usb/cdns3/cdnsp-sky1.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/cdns3/cdnsp-sky1.c
++++ b/drivers/usb/cdns3/cdnsp-sky1.c
+@@ -24,6 +24,7 @@
+ #include <linux/of_address.h>
+ #include <linux/device.h>
+ #include <linux/property.h>
++#include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ 
+ #include "core.h"
+ #include "../host/xhci.h"
+@@ -285,15 +286,38 @@ static int cdnsp_sky1_drd_init(struct cdnsp_sky1 *data)
+ 	int clk;
+ 	int v0, v1, v2;
+ 
+-	reset_control_assert(data->reset);
+-	reset_control_assert(data->preset);
++	dev_dbg(data->dev, "cdnsp_sky1_drd_init: begin (controller reset+reinit)\n");
++
++	ret = reset_control_assert(data->reset);
++	if (ret) {
++		dev_err(data->dev,
++			"cdnsp_sky1_drd_init: failed to assert reset: %d\n", ret);
++		return ret;
++	}
++
++	ret = reset_control_assert(data->preset);
++	if (ret) {
++		dev_err(data->dev,
++			"cdnsp_sky1_drd_init: failed to assert preset: %d\n", ret);
++		return ret;
++	}
++
+ 	sky1_usb_clk_disable_all(data->dev);
+ 	ret = sky1_usb_clk_enable_all(data->dev);
+-	if (ret)
++	if (ret) {
++		dev_err_ratelimited(data->dev,
++			"cdnsp_sky1_drd_init: failed to enable clocks: %d\n", ret);
+ 		return ret;
++	}
+ 	writel(CIX_USB_AXI_WR_CACHE_VALUE, data->axi_base);
+ 	sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG);
+-	reset_control_deassert(data->preset);
++
++	ret = reset_control_deassert(data->preset);
++	if (ret) {
++		dev_err(data->dev,
++			"cdnsp_sky1_drd_init: failed to deassert preset: %d\n", ret);
++		goto err_disable_clk;
++	}
+ 	if (data->u3_disable) {
+ 		dev_info(data->dev, "[%s:%d]disable u3 port\n", __func__, __LINE__);
+ 		writel(D_XEC_CFG_3XPORT_MODE_VALUE, (void *)(data->device_base)
+@@ -458,8 +482,29 @@ static int cdnsp_sky1_drd_init(struct cdnsp_sky1 *data)
+ 		readl((void *)data->xhci_base + XEC_LPM_PRE_REG_1MS),
+ 		readl((void *)data->xhci_base + XEC_LPM_PRE_REG_10MS),
+ 		readl((void *)data->xhci_base + XEC_LPM_PRE_REG_100MS));
+-	reset_control_deassert(data->reset);
++	ret = reset_control_deassert(data->reset);
++	if (ret) {
++		dev_err(data->dev,
++			"cdnsp_sky1_drd_init: failed to deassert reset, controller remains held in reset: %d\n",
++			ret);
++		goto err_assert_preset;
++	}
++	dev_dbg(data->dev, "cdnsp_sky1_drd_init: complete, controller reset released\n");
+ 	return 0;
++
++err_assert_preset:
++	/*
++	 * The main controller reset could not be deasserted, so the
++	 * xHCI/Cadence controller is left held in reset. Do not return
++	 * success in this case - callers must not hand a half-initialized
++	 * controller to USB/storage I/O. Re-assert preset and disable the
++	 * clocks enabled above to leave the device in a fully-quiesced,
++	 * known state rather than a partially clocked/programmed one.
++	 */
++	reset_control_assert(data->preset);
++err_disable_clk:
++	sky1_usb_clk_disable_all(data->dev);
++	return ret;
+ }
+ 
+ static int cdns_sky1_platform_reset(struct device *dev)
+@@ -584,6 +629,9 @@ static int cdnsp_sky1_check_phy_deps(struct device *dev)
+ 						    phy_parent);
+ 		fwnode_handle_put(phy_parent);
+ 		if (!phy_dev || !phy_dev->driver) {
++			dev_dbg(dev,
++				"deferring probe: PHY %s not bound yet\n",
++				phy_dev ? dev_name(phy_dev) : "(not found)");
+ 			if (phy_dev)
+ 				put_device(phy_dev);
+ 			fwnode_handle_put(child);
+@@ -627,15 +675,13 @@ static int cdnsp_sky1_probe(struct platform_device *pdev)
+ 
+ 	data->reset = devm_reset_control_get(&pdev->dev, "usb_reset");
+ 	if (IS_ERR(data->reset)) {
+-		ret = PTR_ERR(data->reset);
+-		dev_err(dev, "[%s:%d]get reset error:%d\n", __func__, __LINE__, ret);
+-		return ret;
++		ret = cix_acpi_resource_lookup_defer(dev, PTR_ERR(data->reset));
++		return dev_err_probe(dev, ret, "failed to get usb_reset\n");
+ 	}
+ 	data->preset = devm_reset_control_get(&pdev->dev, "usb_preset");
+-	if (IS_ERR(data->preset)){
+-		ret = PTR_ERR(data->preset);
+-		dev_err(dev, "[%s:%d]get reset error:%d\n", __func__, __LINE__, ret);
+-		return ret;
++	if (IS_ERR(data->preset)) {
++		ret = cix_acpi_resource_lookup_defer(dev, PTR_ERR(data->preset));
++		return dev_err_probe(dev, ret, "failed to get usb_preset\n");
+ 	}
+ 
+ 	platform_set_drvdata(pdev, data);
+@@ -794,6 +840,10 @@ static int cdnsp_sky1_probe(struct platform_device *pdev)
+ 	device_set_wakeup_capable(dev, true);
+ 	pm_runtime_set_active(dev);
+ 	pm_runtime_enable(dev);
++
++	dev_info(dev, "CIX CDNSP-sky1 wrapper id=%d started (u3-disable=%d ssp-disable=%d)\n",
++		 data->id, data->u3_disable, data->ssp_disable);
++
+ 	return 0;
+ err:
+ 	kfree(cdns_sky1_pdata);

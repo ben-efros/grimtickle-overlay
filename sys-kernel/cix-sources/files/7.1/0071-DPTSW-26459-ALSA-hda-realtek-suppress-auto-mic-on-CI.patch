@@ -27,7 +27,7 @@ Change-Id: Id385284dc9374af5e65589e280c66515a77b3b19
  1 file changed, 33 insertions(+), 3 deletions(-)
 
 diff --git a/sound/hda/codecs/realtek/alc269.c b/sound/hda/codecs/realtek/alc269.c
-index f2e619e..58d7eea 100644
+index 111111111111..222222222222 100644
 --- a/sound/hda/codecs/realtek/alc269.c
 +++ b/sound/hda/codecs/realtek/alc269.c
 @@ -2821,6 +2821,25 @@ static void alc256_fixup_chromebook(struct hda_codec *codec,
@@ -61,9 +61,9 @@ index f2e619e..58d7eea 100644
  	ALC269_FIXUP_CIX_SKY1_ORAPI_6P,
  	ALC269_FIXUP_CIX_SKY1_ORAPI_6P_COEF,
 +	ALC256_FIXUP_CIX_SKY1_NO_AUTO_MIC,
- 	ALC285_FIXUP_LEGION_Y9000X_SPEAKERS,
- 	ALC285_FIXUP_LEGION_Y9000X_AUTOMUTE,
- 	ALC287_FIXUP_LEGION_16ACHG6,
+ };
+ 
+ /* A special fixup for Lenovo C940 and Yoga Duet 7;
 @@ -6778,7 +6798,9 @@ static const struct hda_fixup alc269_fixups[] = {
  			{ 0x57, AC_VERB_SET_COEF_INDEX, 0x03 },
  			{ 0x57, AC_VERB_SET_PROC_COEF,  0x09a3 },
@@ -98,6 +98,9 @@ index f2e619e..58d7eea 100644
 +	[ALC256_FIXUP_CIX_SKY1_NO_AUTO_MIC] = {
 +		.type = HDA_FIXUP_FUNC,
 +		.v.func = alc256_fixup_cix_sky1_no_auto_mic
- 	[ALC256_FIXUP_CHROME_BOOK] = {
- 		.type = HDA_FIXUP_FUNC,
- 		.v.func = alc256_fixup_chromebook,
+ 	}
+ };
+ 
+-- 
+Cixtech
+

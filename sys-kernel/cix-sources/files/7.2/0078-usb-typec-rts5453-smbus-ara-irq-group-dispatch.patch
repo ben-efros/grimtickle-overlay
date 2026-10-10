@@ -1,0 +1,1533 @@
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Subject: [PATCH] usb: typec: rts5453: replace shared-IRQ workaround with SMBus ARA dispatch, add debugfs diagnostics, and fix audit-flagged correctness/lifetime issues
+
+MS-R1 wires two RTS5453 PD controllers to the same physical IRQ line
+on a shared I2C adapter, each described in ACPI as its own
+(incorrectly) "Exclusive" GpioInt. The previous approach elected one
+i2c_client as a permanent "owner" of the shared IRQ, which then polled
+its sibling on every interrupt via a manual sibling-list walk
+(rts_list/rts_lock, rts5453h_irq_rts_handle()). This works but is
+fragile: it depends on election ordering, cannot use the standard
+threaded-IRQ/PM-wake machinery per device, and does not scale cleanly
+to N shared devices.
+
+Replace it with the standard SMBus Alert Response Address (ARA)
+mechanism (SMBus 2.0 Alert Response protocol, already fully supported
+by this kernel's i2c-smbus core), then harden the result against a
+follow-up correctness/lifetime review (patchset_20260728b audit) that
+found several release-blocking issues in an earlier version of this
+change. Both the original ARA redesign and the audit fixes are folded
+into this single patch (originally split as 0078/0079 core+debugfs;
+consolidated here because the intermediate states are not
+independently useful/bisectable) - the 0079 slot is intentionally left
+unused going forward, consistent with the numbering gaps already
+present in the upstream CIX vendor patch series.
+
+Design (SMBus ARA IRQ group):
+
+ - A new struct rts5453_irq_group is created per (i2c_adapter, Linux
+   IRQ) pair the first time an RTS5453 device on that adapter/IRQ
+   probes, and is refcounted across all devices that share it.
+ - The physical IRQ is *not* requested by this driver at all. The
+   group instead passes struct i2c_smbus_alert_setup{ .irq =
+   group->irq } (a non-zero IRQ) to i2c_new_smbus_alert_device(),
+   which makes the generic SMBus-alert core's own smbalert_probe()
+   request the IRQ itself, threaded, with the synchronous bounded ARA
+   drain loop as its handler body (smbus_alert() in i2c-smbus.c: reads
+   the ARA repeatedly, decodes the responding address, dispatches to
+   the matching i2c_client's .alert() via smbus_do_alert(), and stops
+   once no client claims the address). This is deliberately different
+   from an earlier draft of this change, which called the
+   asynchronous i2c_handle_smbus_alert() (which only schedules
+   ara->work and returns) from a driver-owned, separately-requested
+   IRQF_ONESHOT thread; on an active-low level IRQ that meant the
+   group's own thread returned - and the line was unmasked - before
+   the ARA was ever actually read, allowing the still-asserted line to
+   retrigger immediately and IRQ-storm. Letting the generic core own
+   the IRQ end-to-end avoids this entirely, and also preserves
+   whatever trigger type ACPI/GpioInt configured (verified by reading
+   i2c-smbus.c: the non-GPIO-fallback IRQ request path adds no
+   trigger-type flags of its own). irq_get_trigger_type() is checked
+   at group-start time and a dev_warn() is logged if it is not
+   IRQ_TYPE_LEVEL_LOW, so a misconfigured platform is visible in dmesg
+   instead of silently storming.
+ - Only the specific address that responds to an ARA read is
+   serviced - no sibling polling, no election.
+ - Status capture (rts5453_capture_status_locked(), shared by both the
+   interrupt-driven and initial/restore-time paths so they cannot
+   diverge) is split from status application
+   (rts5453_apply_status()/rts5453_apply_work()), with change-detection
+   guards on typec_switch_set()/typec_mux_set().
+ - I2C errors are no longer collapsed to a single -ESHUTDOWN value;
+   the original errno is preserved end to end
+   (rts5453_capture_and_clear_alert(), rts->last_capture_error). Only
+   -ENODEV/-ENXIO/-ESHUTDOWN are treated as immediately "permanent"
+   (offline); any other error escalates to offline only after
+   RTS5453_OFFLINE_ERROR_THRESHOLD (16) consecutive capture failures,
+   so a single transient -EAGAIN/-EREMOTEIO/timeout no longer
+   permanently disables the port.
+ - rts5453h_typec_port_update()'s cached typec->role is now updated
+   only *after* usb_role_switch_set_role() succeeds (it was previously
+   set unconditionally beforehand), so a failed switch no longer wedges
+   an incorrect cached role that would prevent an identical retry.
+ - apply_work is now a delayed_work: a failed apply is retried up to
+   RTS5453_APPLY_MAX_RETRIES (5) times with RTS5453_APPLY_RETRY_DELAY
+   (50 ms) backoff before rts->faulted is latched and logged (these are
+   software retry-policy constants, not derived from any hardware
+   timing requirement - no arbitrary hardware delay was invented).
+   rts5453_apply_status() now returns an error instead of void, and
+   rts5453_apply_work() propagates/logs it via a shared
+   rts5453_log_context()/rts5453_log_context_throttled() helper that
+   dumps port id, adapter/address, Linux IRQ, operation, errno, all six
+   raw status bytes, cached mode/hpd/orientation/role, pending/applied
+   generation and consecutive-error counts (throttled to every
+   occurrence for the first 3 consecutive failures, then every 16th,
+   so the first failure and each state transition are never dropped).
+ - rts5453_read_initial_status() (probe/restore) now shares the same
+   checked capture+apply helpers as the interrupt path instead of its
+   own separate, less-checked update logic, and no longer risks
+   unregistering a NULL Type-C partner.
+ - The group, not each member device, now owns IRQ enable/disable and
+   wake-enable/disable state
+   (rts5453_group_irq_disable()/_enable()/_wake_enable()/_wake_disable(),
+   mutex+depth-counted under group->pm_lock), called from
+   rts5453h_suspend()/_resume()/_restore()/_shutdown() instead of each
+   device independently calling disable_irq()/enable_irq() on the
+   shared physical IRQ. This is more robust across partial-probe,
+   single-member-remove, shutdown and PM-callback-failure orderings
+   than relying on the interrupt core's own per-irq_desc depth
+   counting composing correctly by coincidence. The pre-existing
+   disable_pd_interrupt_store() sysfs knob had a latent bug where it
+   called disable_irq()/enable_irq() unconditionally on every store
+   regardless of whether the value actually changed, which would have
+   desynchronized this depth accounting; it is now gated on an actual
+   value transition.
+ - Group teardown (rts5453_group_leave(), last member) is just
+   i2c_unregister_device(group->ara_client): unbinding the ARA client
+   from smbalert_driver runs devres_release_all() -> free_irq() on the
+   IRQ smbalert_probe() requested via devm_request_threaded_irq(),
+   and free_irq() blocks until any in-flight threaded-handler
+   invocation completes - so no separate manual disable_irq()/
+   synchronize_irq()/free_irq() sequence is needed to fully quiesce
+   dispatch before the group is freed.
+ - A member device unregistering while an ARA dispatch for that same
+   device's address is in flight is already race-free without any
+   extra driver-side locking: smbus_do_alert() takes
+   device_lock(&client->dev) before checking client->dev.driver and
+   calling .alert(), and the i2c/driver-core unbind path
+   (i2c_unregister_device() -> device_release_driver_internal(),
+   triggered by our own rts5453h_remove()) takes that same per-device
+   lock around calling .remove(), only clearing dev->driver at the
+   very end while still holding it - so a device's own .remove() and
+   its own .alert() can never run concurrently.
+ - rts5453h_probe() is converted to labelled goto cleanup
+   (err_group_leave/err_unregister_ports) so a late failure (group
+   join, sysfs attribute creation) unwinds previously-registered
+   Type-C port/altmode/switch/mux/role-switch resources instead of
+   returning directly and leaking them. A pre-existing bug is also
+   fixed here: a failure from rts5453h_init_ports() was previously
+   coerced unconditionally into -EPROBE_DEFER, which would have turned
+   a permanent failure (e.g. -EINVAL from bad port properties) into an
+   indefinitely-retried deferred probe; the real error code is now
+   returned (rts5453h_init_ports() already unwinds anything it
+   partially registered on its own failure paths, so no further
+   cleanup is needed for that specific case).
+
+Debugfs diagnostics (read-only, added on top of the above, no
+behavior-affecting code):
+
+ - /sys/kernel/debug/rts5453/<adapter>-irq<N>/topology - group members,
+   their I2C addresses and the observed IRQ trigger type.
+ - .../counters - group-level IRQ disable/wake depth counters (the
+   old irq_count/ara_runs/ara_dispatch_errors counters are gone: with
+   the generic core now owning ARA dispatch end-to-end, this driver no
+   longer observes those events directly).
+ - .../member-0x%02x - per-device counters, including separate
+   attempt/success pairs for orientation, mux and role-switch
+   operations (so a debugfs snapshot can distinguish "operation was
+   attempted and failed" from "operation was never attempted"),
+   fault/offline state, and last-error/consecutive-error fields for
+   both capture and apply.
+
+The debugfs root is created/destroyed from new explicit module_init()/
+module_exit() functions (replacing module_i2c_driver()), and the
+per-group/per-member directories and files are created and torn down
+alongside the corresponding group/device lifecycle. All debugfs
+creation is unchecked by design: debugfs_create_*() calls safely no-op
+against a NULL/ERR_PTR parent, so a failure here is diagnostics-only
+and never affects driver functionality. This kernel's debugfs
+implementation (DEFINE_SHOW_ATTRIBUTE + debugfs_create_file(), not the
+"_unsafe" variant) already fully serializes debugfs_remove() against
+any in-flight reader via wait_for_completion(&active_users_drained),
+so no additional driver-side reference-counting scheme is needed to
+make these files safe to remove while open.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0078000000000000000000000000000000000078
+---
+ drivers/usb/typec/rts5453.c | 1086 ++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 921 insertions(+), 165 deletions(-)
+
+diff --git a/drivers/usb/typec/rts5453.c b/drivers/usb/typec/rts5453.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/typec/rts5453.c
++++ b/drivers/usb/typec/rts5453.c
+@@ -6,6 +6,7 @@
+ #include <linux/bits.h>
+ #include <linux/bitfield.h>
+ #include <linux/i2c.h>
++#include <linux/i2c-smbus.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/regmap.h>
+@@ -20,6 +21,11 @@
+ #include <linux/module.h>
+ #include <linux/kernel.h>
+ #include <linux/timer.h>
++#include <linux/workqueue.h>
++#include <linux/refcount.h>
++#include <linux/atomic.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ #include <linux/usb/pd.h>
+ #include <linux/usb/typec.h>
+ #include <linux/usb/typec_altmode.h>
+@@ -62,10 +68,99 @@ enum {
+ 	ALTMODE_MAX,
+ };
+ 
++/*
++ * MS-R1 wires two RTS5453 PD controllers (PD00 at 0x30, PD01 at 0x31) to
++ * the same physical GPIO/IRQ line on their shared I2C adapter, each
++ * described in ACPI as its own (incorrectly) "Exclusive" GpioInt. Rather
++ * than electing one of the two i2c_clients as a permanent IRQ "owner" and
++ * having it poll its sibling on every interrupt (the previous approach),
++ * the interrupt line is now owned by this separate per-adapter/per-IRQ
++ * group object. The group creates a single SMBus Alert Response Address
++ * (ARA) client on the adapter, and lets the generic SMBus ARA core
++ * (drivers/i2c/i2c-smbus.c) own the single physical IRQ request and run
++ * its own synchronous, bounded ARA-drain threaded handler; the ARA read
++ * tells us which specific chip is alerting, so only that chip's
++ * .alert() runs - never both, and never an elected "representative".
++ *
++ * The group is keyed by (i2c_adapter pointer, Linux IRQ number) rather
++ * than any hard-coded bus/IRQ number, since Linux's dynamic IRQ/bus
++ * numbering can change across boots or platforms.
++ *
++ * IRQ enable/disable and wake-enable/disable for the shared physical
++ * line are also owned here (pm_lock/irq_disable_depth/wake_depth)
++ * rather than being called once per member device directly against
++ * client->irq: two members independently calling disable_irq()/
++ * enable_irq() (or the wake equivalents) does compose correctly via the
++ * interrupt core's own per-irq_desc depth counting in the common case,
++ * but is fragile across partial-probe, single-member remove/shutdown,
++ * and PM-callback-failure interleavings, where one member's IRQ calls
++ * can end up unbalanced against the other's. Making the group the sole
++ * caller of disable_irq()/enable_irq()/enable_irq_wake()/
++ * disable_irq_wake() - counted once per requesting member here - removes
++ * that fragility. The disable_pd_interrupt sysfs test knob also goes
++ * through these wrappers for the same reason: it manipulates the same
++ * shared physical IRQ and must not desynchronize from the depth this
++ * group tracks.
++ */
++struct rts5453_irq_group {
++	struct list_head global_node;
++	struct list_head members;
++	struct mutex members_lock; /* protects members and ara_client */
++	refcount_t refs;
++
++	struct i2c_adapter *adapter;
++	struct i2c_client *ara_client;
++	/*
++	 * i2c_new_smbus_alert_device() stores this pointer as platform
++	 * data; it does not copy the structure. Keep it here for the
++	 * complete lifetime of the ARA client (until
++	 * i2c_unregister_device(group->ara_client) returns), rather than
++	 * on the stack of rts5453_group_start(). This also supports a
++	 * modular i2c_smbus driver, which may probe the client well after
++	 * rts5453_group_start() has returned.
++	 */
++	struct i2c_smbus_alert_setup ara_setup;
++	unsigned int trigger_type;
++
++	int irq;
++
++	struct mutex pm_lock; /* protects irq_disable_depth/wake_depth below */
++	unsigned int irq_disable_depth;
++	unsigned int wake_depth;
++
++	struct dentry *debugfs_dir;
++};
++
++static LIST_HEAD(rts5453_irq_groups);
++static DEFINE_MUTEX(rts5453_irq_groups_lock);
++
++static struct dentry *rts5453_debugfs_root;
++
++/*
++ * Bounded retry policy for applying a captured status update (Type-C
++ * switch/mux/role-switch/CDNSP-reset side effects) when one of those
++ * calls fails. This is a software backoff policy, not a hardware
++ * timing requirement, so a small fixed count/delay is used rather than
++ * anything derived from register timing documentation.
++ */
++#define RTS5453_APPLY_MAX_RETRIES	5
++#define RTS5453_APPLY_RETRY_DELAY	msecs_to_jiffies(50)
++
++/*
++ * A capture (I2C ack/read/HPD-ack sequence) failure is only treated as
++ * indicating the device is permanently gone (I2C_INT_ACK_BIT write,
++ * status read etc. return -ENODEV/-ENXIO/-ESHUTDOWN) after this many
++ * consecutive failures of any kind, even if none of them individually
++ * look permanent - sustained repeated I/O errors on a shared bus are
++ * themselves a strong signal something is wrong.
++ */
++#define RTS5453_OFFLINE_ERROR_THRESHOLD	16
++
+ struct rts5453h {
+ 	struct device *dev;
++	struct i2c_client *client;
+ 	struct regmap *regmap;
+-	struct mutex lock; /* device lock */
++	struct mutex lock; /* device lock; also serializes capture vs apply of this device's status */
+ 	u8 i2c_protocol:1;	/*i2c or smbus*/
+ 	int id;
+ 	u8 data_status[DATA_STATUS_COUNT];
+@@ -78,16 +163,45 @@ struct rts5453h {
+ 	struct typec_port *port;
+ 	enum usb_role role;
+ 	unsigned long mode;
++	enum typec_orientation orientation;
+ 	u32 hpd_status;
+ 	struct typec_partner	*partner;
+ 	struct typec_partner_desc desc;
+ 	bool pd_int_disabled;
+-	struct list_head list;
+-	struct delayed_work irq_work;
+-};
+ 
+-static LIST_HEAD(rts_list);
+-static DEFINE_MUTEX(rts_lock);
++	struct rts5453_irq_group *irq_group;
++	struct list_head irq_node;
++
++	struct delayed_work apply_work;
++	bool removing;
++	bool offline;
++	bool faulted;
++	atomic_t consecutive_apply_errors;
++	atomic_t consecutive_capture_errors;
++	int last_capture_error;
++	int last_apply_error;
++
++	u8 pending_status[DATA_STATUS_COUNT];
++	unsigned long pending_generation;
++	unsigned long applied_generation;
++
++	atomic64_t alerts;
++	atomic64_t status_reads;
++	atomic64_t status_errors;
++	atomic64_t irq_acks;
++	atomic64_t irq_ack_errors;
++	atomic64_t hpd_acks;
++	atomic64_t hpd_ack_errors;
++	atomic64_t orientation_attempts;
++	atomic64_t orientation_changes;
++	atomic64_t mux_attempts;
++	atomic64_t mux_changes;
++	atomic64_t role_attempts;
++	atomic64_t role_changes;
++	atomic64_t offline_events;
++
++	struct dentry *debugfs_file;
++};
+ 
+ #define RTS_MAX_LEN	64
+ 
+@@ -137,6 +251,47 @@ char oritation_reverse[] = "oritation reverse";
+ char data_host[] = "usb host";
+ char data_device[] = "usb device";
+ 
++/*
++ * Rich, single-line context for every ARA/I2C/switch/mux/role/reset
++ * failure: device/port id, adapter+address, Linux IRQ, the failing
++ * operation and its original errno, all six raw status bytes (as of
++ * the last successful read), cached mode/orientation/role, pending/
++ * applied generation, and the current consecutive-failure count.
++ * Always logs (never dropped) - callers are responsible for only
++ * invoking this at the point a failure/transition first occurs, or
++ * apply a widening interval themselves for genuinely repeated
++ * failures, rather than this helper trying to guess a rate limit.
++ */
++static void rts5453_log_context(struct rts5453h *rts, const char *op, int err)
++{
++	struct i2c_client *client = rts->client;
++	int consecutive = max(atomic_read(&rts->consecutive_apply_errors),
++			       atomic_read(&rts->consecutive_capture_errors));
++	bool ara_active = rts->irq_group && rts->irq_group->ara_client;
++
++	dev_err(rts->dev,
++		"port(%d) i2c-%d@0x%02x irq=%d: %s failed err=%d status=[%02x %02x %02x %02x %02x %02x] mode=%lu hpd=0x%x orientation=%d role=%d pending_gen=%lu applied_gen=%lu consecutive_errors=%d ara_active=%d\n",
++		rts->id, client->adapter->nr, client->addr, client->irq,
++		op, err,
++		rts->data_status[0], rts->data_status[1], rts->data_status[2],
++		rts->data_status[3], rts->data_status[4], rts->data_status[5],
++		rts->mode, rts->hpd_status, rts->orientation, rts->role,
++		rts->pending_generation, rts->applied_generation,
++		consecutive, ara_active);
++}
++
++/*
++ * Logs at every occurrence for the first few consecutive failures of a
++ * given kind (so the initial failure and its immediate repeats are
++ * never silently dropped), then falls back to only logging on every
++ * 16th occurrence to avoid flooding dmesg under sustained bus errors.
++ */
++static void rts5453_log_context_throttled(struct rts5453h *rts, const char *op, int err,
++					   int consecutive)
++{
++	if (consecutive <= 3 || (consecutive % 16) == 0)
++		rts5453_log_context(rts, op, err);
++}
+ 
+ static int rts5453h_typec_port_update(struct rts5453h *typec)
+ {
+@@ -153,10 +308,22 @@ static int rts5453h_typec_port_update(struct rts5453h *typec)
+ 		orientation = TYPEC_ORIENTATION_NORMAL;
+ 	}
+ 
+-	ret = typec_switch_set(typec->ori_sw, orientation);
+-
+-	if (ret)
+-		return ret;
++	/*
++	 * Only push an orientation change to the switch when it actually
++	 * changed - this call may perform PHY register programming and
++	 * must not be repeated on every status poll/apply cycle just
++	 * because a role or HPD bit changed.
++	 */
++	if (typec->orientation != orientation) {
++		atomic64_inc(&typec->orientation_attempts);
++		ret = typec_switch_set(typec->ori_sw, orientation);
++		if (ret) {
++			rts5453_log_context(typec, "typec_switch_set", ret);
++			return ret;
++		}
++		typec->orientation = orientation;
++		atomic64_inc(&typec->orientation_changes);
++	}
+ 
+ 	if ((!(typec->data_status[1] & USB3_2_CONNECTION)) && (!(typec->data_status[1] & USB2_CONNECTION))) {
+ 		role = USB_ROLE_NONE;
+@@ -208,10 +375,23 @@ static int rts5453h_typec_port_update(struct rts5453h *typec)
+ 		typec->state.data = NULL;
+ 	}
+ 
+-	ret = typec_mux_set(typec->mux, &typec->state);
+-
+-	if (ret)
+-		return ret;
++	/*
++	 * Skip the mux_set() call only when neither the mux mode nor the
++	 * DP status/HPD bits changed since the last successful apply -
++	 * dp_data.status carries the HPD IRQ/state bits even when
++	 * state.mode is unchanged (e.g. an HPD IRQ pulse on an already
++	 * connected DP altmode), so both must be compared or HPD
++	 * hot-plug notifications would silently stop being delivered.
++	 */
++	if (typec->mode != typec->state.mode || typec->hpd_status != dp_data.status) {
++		atomic64_inc(&typec->mux_attempts);
++		ret = typec_mux_set(typec->mux, &typec->state);
++		if (ret) {
++			rts5453_log_context(typec, "typec_mux_set", ret);
++			return ret;
++		}
++		atomic64_inc(&typec->mux_changes);
++	}
+ 
+ 	if ((typec->data_status[3]& POWER_MASK) == POWER_SOURCE) {
+ 		typec->caps.type = TYPEC_PORT_SRC;
+@@ -224,8 +404,24 @@ static int rts5453h_typec_port_update(struct rts5453h *typec)
+ 	}
+ 
+ 	if (typec->role != role) {
+-		typec->role = role;
++		/*
++		 * Only cache the new role after usb_role_switch_set_role()
++		 * actually succeeds. The previous code assigned typec->role
++		 * = role first: on failure the cache would already reflect
++		 * the requested role even though the switch/CDNSP reset
++		 * never happened, so an identical subsequent status read
++		 * (role unchanged from the chip's point of view) would
++		 * never retry the switch, permanently losing the role
++		 * change.
++		 */
++		atomic64_inc(&typec->role_attempts);
+ 		ret = usb_role_switch_set_role(typec->role_sw, role);
++		if (ret) {
++			rts5453_log_context(typec, "usb_role_switch_set_role", ret);
++			return ret;
++		}
++		typec->role = role;
++		atomic64_inc(&typec->role_changes);
+ 		if (role == USB_ROLE_DEVICE) {
+ 			typec_set_data_role(typec->port, TYPEC_DEVICE);
+ 		} else {
+@@ -311,58 +507,196 @@ static void rts5453h_typec_register_port_altmodes(struct rts5453h *typec)
+ 	typec->desc.usb_pd = 0;
+ }
+ 
+-static int rts5453h_event_handler(struct rts5453h *rts, u8 clear_irq)
++/*
++ * Reads the six raw status bytes and, if an HPD IRQ bit is pending,
++ * acknowledges it. Shared by both the normal ARA-driven alert capture
++ * (which also acknowledges the chip's general interrupt-pending bit
++ * first) and the initial/restore status read (which must not force
++ * that general interrupt ack unless the chip actually has one pending -
++ * there is no IRQ to clear yet at probe/restore time). Returns the
++ * *original* I2C error, never collapsed to a fixed errno, so a
++ * transient bus error is distinguishable from real removal.
++ */
++static int rts5453_capture_status_locked(struct rts5453h *rts, bool ack_irq)
+ {
+-	int ret = 0;
++	int ret;
+ 	u8 data_control[3] = {0};
++	u8 status[DATA_STATUS_COUNT];
+ 
+-	mutex_lock(&rts->lock);
+-	if (clear_irq) {
++	if (ack_irq) {
+ 		data_control[0] = 2;
+ 		data_control[1] = I2C_INT_ACK_BIT;
+ 		data_control[2] = 0;
+-
+ 		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 3);
+-		if (ret != 0 ) {
+-				goto i2c_err;
++		if (ret) {
++			atomic64_inc(&rts->irq_ack_errors);
++			return ret;
+ 		}
++		atomic64_inc(&rts->irq_acks);
+ 	}
+ 
+-	ret = rts5453h_block_read(rts, RTS_DATA_STATUS, rts->data_status, 6);
+-	if (ret != 0 ) {
+-		goto i2c_err;
+-	} else {
+-		/*
+-		 * This fires on every PD/HPD interrupt; keep it at dev_dbg
+-		 * to avoid flooding the log during sustained USB operation.
+-		 * It changes no behavior, only log verbosity.
+-		 */
+-		dev_dbg(rts->dev, "typec port(%d):data status = 0x%x , 0x%x, 0x%x, 0x%x, 0x%x, 0x%x\n",
+-			rts->id, rts->data_status[0], rts->data_status[1], rts->data_status[2], rts->data_status[3], rts->data_status[4], rts->data_status[5]);
++	ret = rts5453h_block_read(rts, RTS_DATA_STATUS, status, sizeof(status));
++	if (ret) {
++		atomic64_inc(&rts->status_errors);
++		return ret;
+ 	}
++	atomic64_inc(&rts->status_reads);
+ 
+-	rts5453h_typec_port_update(rts);
+-
+-	if (rts->data_status[2] & HPD_IRQ) {
++	if (status[2] & HPD_IRQ) {
+ 		data_control[0] = 2;
+ 		data_control[1] = 0;
+ 		data_control[2] = HPD_IRQ_ACK;
+ 		ret = rts5453h_block_write(rts, RTS_DATA_CONTROL, data_control, 3);
+-		if (ret != 0 ) {
+-			goto i2c_err;
++		if (ret) {
++			atomic64_inc(&rts->hpd_ack_errors);
++			return ret;
+ 		}
++		atomic64_inc(&rts->hpd_acks);
+ 	}
+ 
+-i2c_err:
+-	if (ret != 0 ) {
+-		dev_err(rts->dev, "typec port(%d):i2c transfer error = %d, disable irq\n", rts->id, ret);
+-		ret = -ESHUTDOWN;
++	memcpy(rts->pending_status, status, sizeof(status));
++	rts->pending_generation++;
++	return 0;
++}
++
++/*
++ * Only these errnos indicate the device is actually gone (unplugged
++ * I2C mux segment, adapter shut down, etc). Anything else - -EAGAIN,
++ * -ETIMEDOUT, -EREMOTEIO, a plain -EIO from a single glitched
++ * transaction - is treated as transient: the original errno is
++ * preserved and logged, but the device is not marked offline on a
++ * single occurrence. Sustained transient errors still eventually mark
++ * the device offline via RTS5453_OFFLINE_ERROR_THRESHOLD in the .alert()
++ * callback, since indefinitely repeated bus errors are themselves a
++ * signal of real hardware/bus failure even without one of these codes.
++ */
++static bool rts5453_err_is_permanent(int err)
++{
++	switch (err) {
++	case -ENODEV:
++	case -ENXIO:
++	case -ESHUTDOWN:
++		return true;
++	default:
++		return false;
+ 	}
++}
++
++static int rts5453_capture_and_clear_alert(struct rts5453h *rts)
++{
++	int ret;
++	int errors;
+ 
++	mutex_lock(&rts->lock);
++	ret = rts5453_capture_status_locked(rts, true);
++	mutex_unlock(&rts->lock);
++
++	rts->last_capture_error = ret;
++
++	if (ret) {
++		errors = atomic_inc_return(&rts->consecutive_capture_errors);
++		rts5453_log_context_throttled(rts, "capture", ret, errors);
++	} else {
++		atomic_set(&rts->consecutive_capture_errors, 0);
++	}
++
++	return ret;
++}
++
++/*
++ * Applies the most recently captured status to the Type-C switch/mux/role
++ * and controller state. Runs from apply_work, outside the IRQ-group's
++ * membership lock and outside any per-adapter ARA dispatch context, so it
++ * is free to call typec_switch_set()/typec_mux_set()/
++ * usb_role_switch_set_role() (which may sleep and, via the USB role
++ * switch, may reset the CDNSP controller) without blocking other members
++ * of the group or the ARA dispatcher itself. Returns the error from
++ * rts5453h_typec_port_update() so the caller can decide whether the
++ * generation is safe to advance.
++ */
++static int rts5453_apply_status(struct rts5453h *rts)
++{
++	int ret;
++
++	mutex_lock(&rts->lock);
++	memcpy(rts->data_status, rts->pending_status, sizeof(rts->data_status));
+ 	mutex_unlock(&rts->lock);
++
++	ret = rts5453h_typec_port_update(rts);
++	rts->last_apply_error = ret;
+ 	return ret;
+ }
+ 
++static void rts5453_apply_work(struct work_struct *work)
++{
++	struct rts5453h *rts = container_of(work, struct rts5453h, apply_work.work);
++	unsigned long generation;
++	int ret;
++	int errors;
++
++	mutex_lock(&rts->lock);
++	if (rts->removing || rts->offline) {
++		mutex_unlock(&rts->lock);
++		return;
++	}
++	if (rts->applied_generation == rts->pending_generation) {
++		mutex_unlock(&rts->lock);
++		return;
++	}
++	generation = rts->pending_generation;
++	mutex_unlock(&rts->lock);
++
++	ret = rts5453_apply_status(rts);
++	if (ret) {
++		errors = atomic_inc_return(&rts->consecutive_apply_errors);
++		rts5453_log_context_throttled(rts, "apply", ret, errors);
++
++		if (errors < RTS5453_APPLY_MAX_RETRIES) {
++			/*
++			 * Do not advance applied_generation: retry the same
++			 * captured status shortly. This is a bounded,
++			 * fixed software backoff, not a hardware timing
++			 * requirement.
++			 */
++			schedule_delayed_work(&rts->apply_work, RTS5453_APPLY_RETRY_DELAY);
++			return;
++		}
++
++		dev_err(rts->dev,
++			"typec port(%d): giving up applying status after %d consecutive failures, marking faulted\n",
++			rts->id, errors);
++		mutex_lock(&rts->lock);
++		WRITE_ONCE(rts->faulted, true);
++		/*
++		 * Advance past this generation so a persistently failing
++		 * apply does not spin forever; the next real ARA alert
++		 * (a fresh capture bumping pending_generation again) will
++		 * requeue and retry from a clean error count.
++		 */
++		rts->applied_generation = generation;
++		mutex_unlock(&rts->lock);
++		return;
++	}
++
++	atomic_set(&rts->consecutive_apply_errors, 0);
++	if (READ_ONCE(rts->faulted)) {
++		dev_info(rts->dev, "typec port(%d): status apply succeeded, clearing faulted state\n",
++			 rts->id);
++		WRITE_ONCE(rts->faulted, false);
++	}
++
++	mutex_lock(&rts->lock);
++	rts->applied_generation = generation;
++	/*
++	 * A newer alert may have captured another update while this one
++	 * was being applied; requeue immediately if so instead of relying
++	 * on a future alert that may not come if nothing else changes.
++	 */
++	if (rts->applied_generation != rts->pending_generation)
++		schedule_delayed_work(&rts->apply_work, 0);
++	mutex_unlock(&rts->lock);
++}
++
+ static int rts5453h_typec_parse_port_props(struct typec_capability *cap,
+ 						struct fwnode_handle *fwnode,
+ 						struct device *dev)
+@@ -432,41 +766,58 @@ static void rts5453h_unregister_ports(struct rts5453h *typec)
+ 	}
+ }
+ 
+-static irqreturn_t rts5453h_irq_handle(int irq, void *data)
++/*
++ * i2c_driver .alert() callback - invoked by the core SMBus ARA dispatcher
++ * (see i2c-smbus.c: smbus_alert()/smbus_do_alert()) only for the specific
++ * i2c_client whose address the ARA response identified. This must clear
++ * the chip's own alert synchronously (so repeated ARA reads make forward
++ * progress instead of re-triggering on the same device), but must defer
++ * the higher-level mux/role/controller-reset work to apply_work so this
++ * callback - running from the shared ARA workqueue context - never blocks
++ * on operations that can sleep for a long time or touch the other port.
++ */
++static void rts5453_alert(struct i2c_client *client, enum i2c_alert_protocol protocol,
++			   unsigned int data)
+ {
+-	struct rts5453h *rts = (struct rts5453h *)data;
++	struct rts5453h *rts = i2c_get_clientdata(client);
+ 	int ret;
++	int errors;
+ 
+-	ret = rts5453h_event_handler(rts, 1);
+-
+-	if (ret == -ESHUTDOWN)
+-		disable_irq_nosync(irq);
+-
+-	return IRQ_HANDLED;
+-}
+-
+-static irqreturn_t rts5453h_irq_rts_handle(int irq, void *data)
+-{
+-	struct list_head *item, *tmp;
+-	struct i2c_client *client, *cl;
+-	struct rts5453h *rts = data, *rt;
++	if (protocol != I2C_PROTOCOL_SMBUS_ALERT)
++		return;
+ 
+-	/* handle own rts event */
+-	rts5453h_irq_handle(irq, rts);
++	/*
++	 * This callback and rts5453h_remove()/i2c_device_remove() for this
++	 * same client are already mutually exclusive via the i2c/driver-core
++	 * device_lock() taken by both smbus_do_alert() (drivers/i2c/
++	 * i2c-smbus.c) around this call and by device_release_driver_internal()
++	 * around .remove() - so by the time this runs, remove() either has
++	 * not started yet (offline/removing checks below are then just a
++	 * fast, cheap skip) or has already fully completed and cleared
++	 * client->dev.driver, in which case the i2c core itself never calls
++	 * back in here in the first place.
++	 */
++	if (READ_ONCE(rts->removing) || READ_ONCE(rts->offline))
++		return;
+ 
+-	/* polling other rts event which without irq */
+-	client = to_i2c_client(rts->dev);
+-	mutex_lock(&rts_lock);
+-	list_for_each_safe(item, tmp, &rts_list) {
+-		rt = list_entry(item, struct rts5453h, list);
+-		cl = to_i2c_client(rt->dev);
++	atomic64_inc(&rts->alerts);
+ 
+-		if (client->adapter == cl->adapter && rts != rt)
+-			rts5453h_irq_handle(irq, rt);
++	ret = rts5453_capture_and_clear_alert(rts);
++	if (ret) {
++		errors = atomic_read(&rts->consecutive_capture_errors);
++
++		if (rts5453_err_is_permanent(ret) ||
++		    errors >= RTS5453_OFFLINE_ERROR_THRESHOLD) {
++			WRITE_ONCE(rts->offline, true);
++			atomic64_inc(&rts->offline_events);
++			dev_err(rts->dev,
++				"RTS5453 0x%02x marked offline after capture failure (err=%d, consecutive=%d)\n",
++				client->addr, ret, errors);
++		}
++		return;
+ 	}
+-	mutex_unlock(&rts_lock);
+ 
+-	return IRQ_HANDLED;
++	schedule_delayed_work(&rts->apply_work, 0);
+ }
+ 
+ static int rts5453h_init_ports(struct rts5453h *typec)
+@@ -514,6 +865,52 @@ unregister_ports:
+ 	return ret;
+ }
+ 
++/*
++ * Group-owned IRQ enable/disable and wake-enable/disable, counted once
++ * per requesting member (see the comment on struct rts5453_irq_group).
++ * All call sites that would otherwise call disable_irq()/enable_irq()/
++ * enable_irq_wake()/disable_irq_wake() directly on the shared physical
++ * IRQ - suspend/resume/restore/shutdown and the disable_pd_interrupt
++ * sysfs test knob - go through these instead.
++ */
++static void rts5453_group_irq_disable(struct rts5453_irq_group *group)
++{
++	mutex_lock(&group->pm_lock);
++	if (group->irq_disable_depth++ == 0)
++		disable_irq(group->irq);
++	mutex_unlock(&group->pm_lock);
++}
++
++static void rts5453_group_irq_enable(struct rts5453_irq_group *group)
++{
++	mutex_lock(&group->pm_lock);
++	if (WARN_ON(group->irq_disable_depth == 0))
++		goto out;
++	if (--group->irq_disable_depth == 0)
++		enable_irq(group->irq);
++out:
++	mutex_unlock(&group->pm_lock);
++}
++
++static void rts5453_group_irq_wake_enable(struct rts5453_irq_group *group)
++{
++	mutex_lock(&group->pm_lock);
++	if (group->wake_depth++ == 0)
++		enable_irq_wake(group->irq);
++	mutex_unlock(&group->pm_lock);
++}
++
++static void rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
++{
++	mutex_lock(&group->pm_lock);
++	if (WARN_ON(group->wake_depth == 0))
++		goto out;
++	if (--group->wake_depth == 0)
++		disable_irq_wake(group->irq);
++out:
++	mutex_unlock(&group->pm_lock);
++}
++
+ static ssize_t disable_pd_interrupt_show(struct device *dev,
+ 		struct device_attribute *attr,
+ 		char *buf)
+@@ -540,86 +937,403 @@ static ssize_t disable_pd_interrupt_store(struct device *dev,
+ 	int ret;
+ 
+ 	ret = kstrtobool(buf, &value);
+-	if (!ret) {
+-		rts->pd_int_disabled = value;
+-
+-		if (value)
+-			disable_irq(client->irq);
+-		else
+-			enable_irq(client->irq);
++	if (ret)
++		return ret;
+ 
+-		dev_alert(dev, "Only for USB Compliance test, PD int is %s\n",
+-				value ? "disabled" : "enabled");
++	if (!rts->irq_group) {
++		dev_err(dev, "no shared IRQ group to toggle\n");
++		return -ENODEV;
+ 	}
+ 
+-	if (!ret)
++	/*
++	 * Only transition disable_irq()/enable_irq() when this device's
++	 * own cached state actually changes - the previous code called
++	 * disable_irq()/enable_irq() unconditionally on every store,
++	 * including repeats of the same value, which would desynchronize
++	 * any depth-based accounting (this device's own repeated "disable"
++	 * writes would each increment the group's disable depth, requiring
++	 * an equal number of "enable" writes to actually re-enable the
++	 * line instead of a single one).
++	 */
++	if (value == rts->pd_int_disabled)
+ 		return count;
+ 
+-	return ret;
++	rts->pd_int_disabled = value;
++
++	if (value)
++		rts5453_group_irq_disable(rts->irq_group);
++	else
++		rts5453_group_irq_enable(rts->irq_group);
++
++	dev_alert(dev, "Only for USB Compliance test, PD int is %s\n",
++			value ? "disabled" : "enabled");
++
++	return count;
+ }
+ 
+ DEVICE_ATTR_RW(disable_pd_interrupt);
+ 
+-static bool is_rts_irq_shared_deivces_all_bound(struct rts5453h *rts)
++/*
++ * Creates the group's SMBus ARA client, once per group, when the first
++ * member joins. Passing setup.irq = group->irq (rather than 0) tells the
++ * generic ARA core (i2c-smbus.c: smbalert_probe()) to request the
++ * physical IRQ itself and run its own synchronous, bounded ARA-drain
++ * loop (smbus_alert()) as the threaded IRQ handler.
++ *
++ * An earlier revision instead passed irq=0 and drove dispatch from a
++ * second, separately-requested threaded IRQ handler here that called
++ * the *asynchronous* i2c_handle_smbus_alert() (which only does
++ * schedule_work() and returns immediately). On this active-low,
++ * level-triggered shared line that meant IRQF_ONESHOT unmasked the
++ * still-asserted line before the ARA had ever actually been read or the
++ * chip's SMBALERT# actually cleared, letting the line re-assert and
++ * retrigger the threaded handler immediately - an IRQ storm under any
++ * sustained load. Passing setup.irq = group->irq instead means the
++ * line stays masked for the *entire* synchronous ARA-drain loop, and
++ * IRQF_ONESHOT only unmasks it once every responding client has been
++ * serviced and SMBALERT# is actually deasserted.
++ */
++static int rts5453_group_start(struct rts5453_irq_group *group)
+ {
+-	struct i2c_client *client;
+-	struct fwnode_handle *child, *gchild;
+-	int all_bound = 1, is_rts_node = 0;
+-
+-	device_for_each_child_node(rts->dev->parent, child) {
+-		is_rts_node = 0;
+-		fwnode_for_each_child_node(child, gchild) {
+-			if (fwnode_property_present(gchild, "power-role")
+-			&& fwnode_property_present(gchild, "data-role")
+-			&& fwnode_property_present(gchild, "try-power-role")) {
+-				is_rts_node = 1;
+-				break;
+-			}
++	int ret;
++
++	group->trigger_type = irq_get_trigger_type(group->irq);
++	if (group->trigger_type != IRQ_TYPE_LEVEL_LOW)
++		dev_warn(&group->adapter->dev,
++			 "RTS5453 shared IRQ %d has trigger type 0x%x, expected active-low level (0x%x)\n",
++			 group->irq, group->trigger_type, IRQ_TYPE_LEVEL_LOW);
++
++	/*
++	 * group->ara_setup must outlive this function: i2c_smbus_alert
++	 * stores this pointer as the new i2c_client's platform_data and
++	 * dereferences it whenever smbalert_probe() actually runs, which
++	 * can be well after rts5453_group_start() returns if i2c_smbus is
++	 * built as a module. A stack-local struct here would leave that
++	 * pointer dangling and hand smbalert_probe() whatever garbage
++	 * happens to be on the stack by the time it probes - which is
++	 * exactly what silently corrupted the IRQ number in the field.
++	 */
++	group->ara_setup.irq = group->irq;
++
++	dev_info(&group->adapter->dev,
++		 "creating RTS5453 ARA client: i2c-%d irq=%d trigger=0x%x setup=%px\n",
++		 group->adapter->nr, group->irq, group->trigger_type,
++		 &group->ara_setup);
++
++	group->ara_client = i2c_new_smbus_alert_device(group->adapter,
++						&group->ara_setup);
++	if (IS_ERR(group->ara_client)) {
++		ret = PTR_ERR(group->ara_client);
++		group->ara_client = NULL;
++		dev_err(&group->adapter->dev,
++			"failed to create RTS5453 ARA client: i2c-%d irq=%d err=%d\n",
++			group->adapter->nr, group->irq, ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++/*
++ * Diagnostics: debugfs rather than unconditional dmesg logging, per the
++ * "reduce log noise, add debugfs" direction covering both this rewrite
++ * and the earlier dev_info->dev_dbg status-dump change (0076).
++ */
++static int rts5453_group_topology_show(struct seq_file *s, void *unused)
++{
++	struct rts5453_irq_group *group = s->private;
++
++	mutex_lock(&group->members_lock);
++	seq_printf(s, "adapter=i2c-%d irq=%d trigger=0x%x members=%u ara=%s\n",
++		   group->adapter->nr, group->irq, group->trigger_type,
++		   refcount_read(&group->refs),
++		   group->ara_client ? "registered" : "none");
++	mutex_unlock(&group->members_lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(rts5453_group_topology);
++
++static int rts5453_group_counters_show(struct seq_file *s, void *unused)
++{
++	struct rts5453_irq_group *group = s->private;
++
++	/*
++	 * With setup.irq = group->irq (see rts5453_group_start()), the
++	 * generic ARA core owns IRQ request and dispatch entirely inside
++	 * i2c-smbus.c; this driver has no hook into its per-IRQ/per-ARA-read
++	 * counts. Each member device's own "alerts" counter (in its
++	 * member-0x%02x file) is the practical per-address dispatch count
++	 * for validation purposes instead.
++	 */
++	mutex_lock(&group->pm_lock);
++	seq_printf(s, "irq_disable_depth=%u wake_depth=%u\n",
++		   group->irq_disable_depth, group->wake_depth);
++	mutex_unlock(&group->pm_lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(rts5453_group_counters);
++
++static int rts5453_device_stats_show(struct seq_file *s, void *unused)
++{
++	struct rts5453h *rts = s->private;
++
++	seq_printf(s, "id=%d addr=0x%02x online=%d faulted=%d\n",
++		   rts->id, rts->client->addr, !READ_ONCE(rts->offline),
++		   READ_ONCE(rts->faulted));
++	seq_printf(s, "alerts=%lld\n", (long long)atomic64_read(&rts->alerts));
++	seq_printf(s, "status_reads=%lld\n", (long long)atomic64_read(&rts->status_reads));
++	seq_printf(s, "status_errors=%lld\n", (long long)atomic64_read(&rts->status_errors));
++	seq_printf(s, "irq_acks=%lld\n", (long long)atomic64_read(&rts->irq_acks));
++	seq_printf(s, "irq_ack_errors=%lld\n", (long long)atomic64_read(&rts->irq_ack_errors));
++	seq_printf(s, "hpd_acks=%lld\n", (long long)atomic64_read(&rts->hpd_acks));
++	seq_printf(s, "hpd_ack_errors=%lld\n", (long long)atomic64_read(&rts->hpd_ack_errors));
++	seq_printf(s, "orientation_attempts=%lld orientation_changes=%lld\n",
++		   (long long)atomic64_read(&rts->orientation_attempts),
++		   (long long)atomic64_read(&rts->orientation_changes));
++	seq_printf(s, "mux_attempts=%lld mux_changes=%lld\n",
++		   (long long)atomic64_read(&rts->mux_attempts),
++		   (long long)atomic64_read(&rts->mux_changes));
++	seq_printf(s, "role_attempts=%lld role_changes=%lld\n",
++		   (long long)atomic64_read(&rts->role_attempts),
++		   (long long)atomic64_read(&rts->role_changes));
++	seq_printf(s, "offline_events=%lld\n", (long long)atomic64_read(&rts->offline_events));
++	seq_printf(s, "consecutive_capture_errors=%d last_capture_error=%d\n",
++		   atomic_read(&rts->consecutive_capture_errors), rts->last_capture_error);
++	seq_printf(s, "consecutive_apply_errors=%d last_apply_error=%d\n",
++		   atomic_read(&rts->consecutive_apply_errors), rts->last_apply_error);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(rts5453_device_stats);
++
++static struct rts5453_irq_group *rts5453_group_find_locked(struct i2c_adapter *adapter, int irq)
++{
++	struct rts5453_irq_group *group;
++
++	list_for_each_entry(group, &rts5453_irq_groups, global_node) {
++		if (group->adapter == adapter && group->irq == irq)
++			return group;
++	}
++
++	return NULL;
++}
++
++/*
++ * Finds or creates the IRQ group for this client's (adapter, irq) pair,
++ * adds the client as a member, and - only for the first member to join -
++ * creates the ARA client and requests the physical IRQ. The group is
++ * intentionally keyed by adapter pointer and Linux IRQ number rather
++ * than any hard-coded bus/IRQ number, since both are dynamically
++ * assigned and not guaranteed stable across platforms or boots.
++ */
++static int rts5453_group_join(struct rts5453h *rts)
++{
++	struct i2c_client *client = rts->client;
++	struct rts5453_irq_group *group;
++	struct rts5453h *member;
++	bool created = false;
++	int ret = 0;
++	char group_name[32];
++
++	mutex_lock(&rts5453_irq_groups_lock);
++
++	group = rts5453_group_find_locked(client->adapter, client->irq);
++	if (!group) {
++		group = kzalloc(sizeof(*group), GFP_KERNEL);
++		if (!group) {
++			mutex_unlock(&rts5453_irq_groups_lock);
++			return -ENOMEM;
++		}
++
++		INIT_LIST_HEAD(&group->members);
++		mutex_init(&group->members_lock);
++		mutex_init(&group->pm_lock);
++		refcount_set(&group->refs, 1);
++		group->adapter = client->adapter;
++		group->irq = client->irq;
++
++		list_add(&group->global_node, &rts5453_irq_groups);
++		created = true;
++	} else {
++		refcount_inc(&group->refs);
++	}
++
++	mutex_unlock(&rts5453_irq_groups_lock);
++
++	mutex_lock(&group->members_lock);
++
++	list_for_each_entry(member, &group->members, irq_node) {
++		if (member->client->addr == client->addr) {
++			dev_err(&client->dev,
++				"RTS5453 addr 0x%02x already a member of this IRQ group\n",
++				client->addr);
++			ret = -EEXIST;
++			goto out_unlock;
++		}
++	}
++
++	rts->irq_group = group;
++	list_add_tail(&rts->irq_node, &group->members);
++
++	dev_info(&client->dev, "RTS5453 id=%d i2c-%d addr=0x%02x irq=%d\n",
++		 rts->id, client->adapter->nr, client->addr, client->irq);
++
++	if (created) {
++		ret = rts5453_group_start(group);
++		if (ret) {
++			list_del(&rts->irq_node);
++			rts->irq_group = NULL;
++			dev_err(&client->dev, "failed to start RTS5453 IRQ group: %d\n", ret);
++			goto out_unlock;
+ 		}
+-		if (!is_rts_node)
+-			continue;
+ 
+-		client = i2c_find_device_by_fwnode(child);
+-		if (!client || !device_is_bound(&client->dev)) {
+-			all_bound = 0;
+-			break;
++		snprintf(group_name, sizeof(group_name), "i2c%d-irq%d",
++			 client->adapter->nr, client->irq);
++		group->debugfs_dir = debugfs_create_dir(group_name, rts5453_debugfs_root);
++		debugfs_create_file("topology", 0444, group->debugfs_dir, group,
++				     &rts5453_group_topology_fops);
++		debugfs_create_file("counters", 0444, group->debugfs_dir, group,
++				     &rts5453_group_counters_fops);
++	}
++
++	if (group->debugfs_dir) {
++		char member_name[32];
++
++		snprintf(member_name, sizeof(member_name), "member-0x%02x", client->addr);
++		rts->debugfs_file = debugfs_create_file(member_name, 0444, group->debugfs_dir,
++							 rts, &rts5453_device_stats_fops);
++	}
++
++	dev_info(&client->dev, "RTS5453 ARA group: i2c-%d irq=%d members=%u\n",
++		 client->adapter->nr, client->irq, refcount_read(&group->refs));
++
++out_unlock:
++	mutex_unlock(&group->members_lock);
++
++	if (ret) {
++		mutex_lock(&rts5453_irq_groups_lock);
++		if (refcount_dec_and_test(&group->refs)) {
++			list_del(&group->global_node);
++			mutex_unlock(&rts5453_irq_groups_lock);
++			mutex_destroy(&group->members_lock);
++			mutex_destroy(&group->pm_lock);
++			kfree(group);
++		} else {
++			mutex_unlock(&rts5453_irq_groups_lock);
+ 		}
+ 	}
+ 
+-	return all_bound;
++	return ret;
+ }
+ 
+-static void rts_request_irq_work_fn(struct work_struct *work)
++/*
++ * Removes this client from its IRQ group. Only the last member leaving
++ * tears the group down: it unregisters the ARA client (which itself
++ * synchronously frees the devm-managed physical IRQ requested by the
++ * generic ARA core in rts5453_group_start() - see the comment there),
++ * removes the group from the global registry, and frees it. Neither
++ * PD00 nor PD01 ever requests the physical IRQ itself, so neither ever
++ * needs to free it either.
++ *
++ * Concurrency with an in-flight ARA dispatch for *this* client's own
++ * address is already handled correctly without any extra code here:
++ * smbus_do_alert() (drivers/i2c/i2c-smbus.c) takes device_lock(&client
++ * ->dev) - this same client's device - before checking client->dev.driver
++ * and calling driver->alert(). i2c_unregister_device(rts->client)
++ * (invoked by our caller, rts5453h_remove(), via the i2c/driver-core)
++ * takes that exact same lock around calling this driver's own .remove()
++ * and only clears client->dev.driver at the very end, still under the
++ * lock. So either an in-flight alert for this client finishes first and
++ * then removal proceeds, or removal proceeds first and only then does a
++ * blocked-on-the-lock alert see driver == NULL and skip - there is no
++ * window where .alert() can run concurrently with, or after, this
++ * client's own removal completing.
++ *
++ * For the *last* member specifically, tearing down the group's ARA
++ * client also fully quiesces the group (see rts5453_group_start()'s
++ * comment on synchronous IRQ teardown via devm), so no member's alert
++ * callback can be invoked once this function returns for the last
++ * member either.
++ */
++static void rts5453_group_leave(struct rts5453h *rts)
+ {
+-	struct rts5453h *rts = container_of(work, struct rts5453h, irq_work.work);
+-	struct i2c_client *client = to_i2c_client(rts->dev);
+-	int ret;
++	struct rts5453_irq_group *group = rts->irq_group;
++	bool last;
+ 
+-	if (client->irq <= 0)
++	if (!group)
+ 		return;
+ 
+-	if (!is_rts_irq_shared_deivces_all_bound(rts)) {
+-		schedule_delayed_work(&rts->irq_work, msecs_to_jiffies(5));
+-		dev_dbg(rts->dev, "irq work scheduled\n");
++	debugfs_remove(rts->debugfs_file);
++	rts->debugfs_file = NULL;
++
++	mutex_lock(&group->members_lock);
++	list_del(&rts->irq_node);
++	mutex_unlock(&group->members_lock);
++
++	rts->irq_group = NULL;
++
++	mutex_lock(&rts5453_irq_groups_lock);
++	last = refcount_dec_and_test(&group->refs);
++	if (last)
++		list_del(&group->global_node);
++	mutex_unlock(&rts5453_irq_groups_lock);
++
++	if (!last)
+ 		return;
+-	}
+ 
+-	irq_set_status_flags(client->irq, IRQ_DISABLE_UNLAZY);
+-	ret = request_threaded_irq(client->irq, NULL,
+-				   rts5453h_irq_rts_handle,
+-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+-				   dev_name(&client->dev), rts);
+-	if (ret == -EBUSY) {
+-		/* irq already request in other rts, do nothing here */
+-		dev_info(&client->dev, "irq %d already registerd", client->irq);
+-	} else if (ret < 0) {
+-		dev_err(&client->dev, "request irq %d failed %d", client->irq, ret);
+-	} else {
+-		/* succeed! remove from polling list and handle separately. */
+-		mutex_lock(&rts_lock);
+-		list_del_init(&rts->list);
+-		mutex_unlock(&rts_lock);
+-	}
++	/*
++	 * i2c_unregister_device() unbinds the ARA pseudo-client from
++	 * smbalert_driver, which runs smbalert_remove() and then releases
++	 * its devm resources - including devm_request_threaded_irq()'s
++	 * IRQ, via free_irq(), which itself blocks until any currently
++	 * running instance of the threaded handler completes. No manual
++	 * disable_irq()/synchronize_irq()/free_irq() sequence is needed
++	 * here; this driver never requests the physical IRQ itself.
++	 */
++	if (group->ara_client)
++		i2c_unregister_device(group->ara_client);
++
++	debugfs_remove_recursive(group->debugfs_dir);
++
++	mutex_destroy(&group->members_lock);
++	mutex_destroy(&group->pm_lock);
++	kfree(group);
++}
++
++static int rts5453_read_initial_status(struct rts5453h *rts)
++{
++	unsigned long generation;
++	int ret;
++
++	mutex_lock(&rts->lock);
++	/*
++	 * No IRQ is being acknowledged here - this runs at probe/restore
++	 * time before (or independent of) any actual pending interrupt -
++	 * so skip the generic I2C_INT_ACK_BIT write that the normal
++	 * ARA-driven capture path performs; only the conditional HPD ack
++	 * is shared, via rts5453_capture_status_locked(rts, false).
++	 */
++	ret = rts5453_capture_status_locked(rts, false);
++	generation = rts->pending_generation;
++	mutex_unlock(&rts->lock);
++
++	if (ret)
++		return ret;
++
++	/*
++	 * No concurrent IRQ/ARA activity exists yet at probe/restore time,
++	 * so applying synchronously (through the same checked apply helper
++	 * used for normal IRQ-driven updates, rather than writing directly
++	 * to rts->data_status/rts->partner with different semantics) is
++	 * safe and keeps this path from silently diverging from the
++	 * generation-tracked, error-checked normal path.
++	 */
++	ret = rts5453_apply_status(rts);
++
++	mutex_lock(&rts->lock);
++	rts->applied_generation = generation;
++	mutex_unlock(&rts->lock);
++
++	return ret;
+ }
+ 
+ static int rts5453h_probe(struct i2c_client *client)
+@@ -639,8 +1333,10 @@ static int rts5453h_probe(struct i2c_client *client)
+ 	rts5453h_typec_register_port_altmodes(rts);
+ 
+ 	mutex_init(&rts->lock);
++	INIT_DELAYED_WORK(&rts->apply_work, rts5453_apply_work);
+ 
+ 	rts->dev = &client->dev;
++	rts->client = client;
+ 	rts->regmap = devm_regmap_init_i2c(client, &rts5453h_regmap_config);
+ 
+ 	if (IS_ERR(rts->regmap))
+@@ -654,36 +1350,58 @@ static int rts5453h_probe(struct i2c_client *client)
+ 
+ 	i2c_set_clientdata(client, rts);
+ 
++	/*
++	 * rts5453h_init_ports() already unregisters anything it partially
++	 * registered on its own failure paths, so its real error is
++	 * returned as-is instead of the previous unconditional
++	 * -EPROBE_DEFER, which would have silently converted a permanent
++	 * failure (e.g. -EINVAL from bad port properties) into an
++	 * indefinitely-retried deferred probe.
++	 */
+ 	ret = rts5453h_init_ports(rts);
+ 	if (ret)
+-		return -EPROBE_DEFER;
++		return ret;
+ 
+-	ret = rts5453h_event_handler(rts, 0);
++	/*
++	 * Read status once synchronously at probe time, before this device
++	 * joins its IRQ group - there is no concurrent IRQ/ARA activity yet,
++	 * so this does not need to go through the pending/applied generation
++	 * pipeline used for IRQ-driven updates.
++	 */
++	ret = rts5453_read_initial_status(rts);
+ 	if (ret) {
+ 		dev_err(&client->dev, "typec event handling error %d", ret);
+-		return ret;
++		goto err_unregister_ports;
+ 	}
+-	/*
+-	* TBD Check do anything about in init schedule like enable interrupt
+-	* or check the firmware running status before request irq
+-	*/
+ 
+-	INIT_LIST_HEAD(&rts->list);
+-	mutex_lock(&rts_lock);
+-	list_add(&rts->list, &rts_list);
+-	mutex_unlock(&rts_lock);
+-
+-	INIT_DELAYED_WORK(&rts->irq_work, rts_request_irq_work_fn);
+-	if (client->irq)
+-		schedule_delayed_work(&rts->irq_work, msecs_to_jiffies(5));
++	if (client->irq > 0) {
++		ret = rts5453_group_join(rts);
++		if (ret) {
++			dev_err(&client->dev, "failed to join RTS5453 IRQ group: %d\n", ret);
++			goto err_unregister_ports;
++		}
++	}
+ 
+ 	ret = device_create_file(&client->dev, &dev_attr_disable_pd_interrupt);
+-	if (ret < 0)
+-		dev_err(&client->dev, "Failed to create sysfs attribute, ret = %d\n",
+-			ret);
++	if (ret < 0) {
++		dev_err(&client->dev, "Failed to create sysfs attribute, ret = %d\n", ret);
++		goto err_group_leave;
++	}
+ 
+ 	device_set_wakeup_capable(&client->dev, true);
+ 
++	return 0;
++
++err_group_leave:
++	rts5453_group_leave(rts);
++err_unregister_ports:
++	/*
++	 * Ports/switch/mux/role-switch handles are live at this point (init
++	 * succeeded above), so they must be explicitly unwound here -
++	 * unlike an rts5453h_init_ports() failure itself, which already
++	 * unregisters anything it partially registered before returning.
++	 */
++	rts5453h_unregister_ports(rts);
+ 	return ret;
+ }
+ 
+@@ -691,8 +1409,13 @@ static void rts5453h_remove(struct i2c_client *client)
+ {
+ 	struct rts5453h *rts = i2c_get_clientdata(client);
+ 
++	WRITE_ONCE(rts->removing, true);
++	cancel_delayed_work_sync(&rts->apply_work);
++
+ 	device_remove_file(&client->dev, &dev_attr_disable_pd_interrupt);
+ 
++	rts5453_group_leave(rts);
++
+ 	if (rts->partner) {
+ 		typec_unregister_partner(rts->partner);
+ 		rts->partner = NULL;
+@@ -705,13 +1428,6 @@ static void rts5453h_remove(struct i2c_client *client)
+ 	if (rts->port) {
+ 		typec_unregister_port(rts->port);
+ 	}
+-
+-	if (client->irq > 0)
+-		free_irq(client->irq, rts);
+-
+-	mutex_lock(&rts_lock);
+-	list_del(&rts->list);
+-	mutex_unlock(&rts_lock);
+ }
+ 
+ static const struct of_device_id rts5453h_of_match[] = {
+@@ -734,10 +1450,14 @@ static const struct i2c_device_id rts5453h_id[] = {
+ static int rts5453h_suspend(struct device *dev)
+ {
+ 	struct i2c_client *client = to_i2c_client(dev);
++	struct rts5453h *rts = i2c_get_clientdata(client);
++
++	if (!rts->irq_group)
++		return 0;
+ 
+-	disable_irq(client->irq);
++	rts5453_group_irq_disable(rts->irq_group);
+ 	if (device_may_wakeup(dev)) {
+-		enable_irq_wake(client->irq);
++		rts5453_group_irq_wake_enable(rts->irq_group);
+ 		dev_info(&client->dev, "enable wake");
+ 	}
+ 
+@@ -747,12 +1467,16 @@ static int rts5453h_suspend(struct device *dev)
+ static int rts5453h_resume(struct device *dev)
+ {
+ 	struct i2c_client *client = to_i2c_client(dev);
++	struct rts5453h *rts = i2c_get_clientdata(client);
++
++	if (!rts->irq_group)
++		return 0;
+ 
+ 	if (device_may_wakeup(dev)) {
+-		disable_irq_wake(client->irq);
++		rts5453_group_irq_wake_disable(rts->irq_group);
+ 		dev_info(&client->dev, "enable irq");
+ 	}
+-	enable_irq(client->irq);
++	rts5453_group_irq_enable(rts->irq_group);
+ 
+ 	return 0;
+ }
+@@ -763,14 +1487,16 @@ static int rts5453h_restore(struct device *dev)
+ 	struct rts5453h *rts = i2c_get_clientdata(client);
+ 	int ret = 0;
+ 
+-	if (device_may_wakeup(dev)) {
+-		disable_irq_wake(client->irq);
+-		dev_info(&client->dev, "enable irq");
++	if (rts->irq_group) {
++		if (device_may_wakeup(dev)) {
++			rts5453_group_irq_wake_disable(rts->irq_group);
++			dev_info(&client->dev, "enable irq");
++		}
++		rts5453_group_irq_enable(rts->irq_group);
+ 	}
+-	enable_irq(client->irq);
+ 
+ 	/* Re-trigger PD event if PD event occurs during std */
+-	ret = rts5453h_event_handler(rts, 0);
++	ret = rts5453_read_initial_status(rts);
+ 	if (ret) {
+ 		dev_err(&client->dev, "typec event handling error %d", ret);
+ 		return ret;
+@@ -782,13 +1508,24 @@ static int rts5453h_restore(struct device *dev)
+ 
+ static void rts5453h_shutdown(struct i2c_client *client)
+ {
+-	if (client->irq) {
+-		disable_irq(client->irq);
++	struct rts5453h *rts = i2c_get_clientdata(client);
++
++	if (rts->irq_group) {
++		rts5453_group_irq_disable(rts->irq_group);
+ 		if (device_may_wakeup(&client->dev)) {
+-			enable_irq_wake(client->irq);
++			rts5453_group_irq_wake_enable(rts->irq_group);
+ 			dev_info(&client->dev, "enable wake");
+ 		}
+ 	}
++
++	/*
++	 * Once the IRQ is disabled above no new alert for this device can
++	 * arrive, but an apply_work instance queued by an alert just before
++	 * shutdown could still be pending or running; make sure it has
++	 * finished before returning; this driver does not unregister ports
++	 * here, so it is safe for it to still touch typec/mux/role state.
++	 */
++	cancel_delayed_work_sync(&rts->apply_work);
+ }
+ 
+ static const struct dev_pm_ops rts5453h_pm_ops = {
+@@ -810,10 +1547,29 @@ static struct i2c_driver rts5453h_i2c_driver = {
+ 	.probe = rts5453h_probe,
+ 	.remove = rts5453h_remove,
+ 	.id_table = rts5453h_id,
+-	.shutdown = rts5453h_shutdown
++	.shutdown = rts5453h_shutdown,
++	.alert = rts5453_alert,
+ };
+ 
+-module_i2c_driver(rts5453h_i2c_driver);
++static int __init rts5453h_driver_init(void)
++{
++	/*
++	 * debugfs failures are diagnostics-only and never fatal; every
++	 * debugfs_create_*() call safely no-ops against a NULL/ERR_PTR
++	 * parent, so this root directory's creation is not checked here.
++	 */
++	rts5453_debugfs_root = debugfs_create_dir("rts5453", NULL);
++
++	return i2c_add_driver(&rts5453h_i2c_driver);
++}
++module_init(rts5453h_driver_init);
++
++static void __exit rts5453h_driver_exit(void)
++{
++	i2c_del_driver(&rts5453h_i2c_driver);
++	debugfs_remove_recursive(rts5453_debugfs_root);
++}
++module_exit(rts5453h_driver_exit);
+ MODULE_AUTHOR("Chao Zeng <Chao.Zeng@cixtech.com>");
+ MODULE_LICENSE("GPL v2");
+ MODULE_DESCRIPTION("REALTEK RTS5453H USB PD Controller Driver");

@@ -1,29 +1,19 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: Jason Perlow <jperlow@gmail.com>
-Date: Thu, 2 Jul 2026 22:04:34 -0400
-Subject: [PATCH 77/83] pmdomain: add acpi support to cix soc (NCZ 0008
+From: Jianfeng Liu <Jianfeng.Liu@cixtech.com>
+Date: Wed, 18 Mar 2026 14:29:39 +0800
+Subject: pmdomain: add acpi support to cix soc
 
-Source: ncz-os/meta-cix (Jason Perlow <jperlow@gmail.com>)
-        linux-cix-sky1-ncz-7.2/patches-7.2/0077-pmdomain-add-acpi-support-to-cix-soc-NCZ-0008-forwar.patch
-Adopted: grimtickle-overlay 7.2.9 forward-port; original preamble preserved.
-         See NOTICE.md.
- forward-port to v7.2)
-
-Keep the v7.2 of_genpd child-ids teardown but guard the DT-provider
-paths on np for ACPI boot.
-
-Upstream-Status: Inappropriate [oe-specific]
+Signed-off-by: Jianfeng Liu <Jianfeng.Liu@cixtech.com>
 ---
- drivers/pmdomain/arm/scmi_perf_domain.c | 151 ++++++++++++-
- drivers/pmdomain/arm/scmi_pm_domain.c   |  79 +++++--
- drivers/pmdomain/core.c                 | 272 ++++++++++++++++++++++--
- include/linux/pm_domain.h               |  17 ++
- include/linux/scmi_perf_domain.h        |  34 +++
- 5 files changed, 519 insertions(+), 34 deletions(-)
- create mode 100644 include/linux/scmi_perf_domain.h
+ drivers/pmdomain/arm/scmi_perf_domain.c | 151 ++++-
+ drivers/pmdomain/arm/scmi_pm_domain.c   |  62 ++-
+ drivers/pmdomain/core.c                 | 272 +++++++++-
+ include/linux/pm_domain.h               |  17 +
+ include/linux/scmi_perf_domain.h        |  34 ++
+ 5 files changed, 508 insertions(+), 28 deletions(-)
 
 diff --git a/drivers/pmdomain/arm/scmi_perf_domain.c b/drivers/pmdomain/arm/scmi_perf_domain.c
-index 3693423459c9..0391d4afc131 100644
+index 111111111111..222222222222 100644
 --- a/drivers/pmdomain/arm/scmi_perf_domain.c
 +++ b/drivers/pmdomain/arm/scmi_perf_domain.c
 @@ -5,12 +5,15 @@
@@ -228,7 +218,7 @@ index 3693423459c9..0391d4afc131 100644
  
  MODULE_AUTHOR("Ulf Hansson <ulf.hansson@linaro.org>");
 diff --git a/drivers/pmdomain/arm/scmi_pm_domain.c b/drivers/pmdomain/arm/scmi_pm_domain.c
-index 3d73aef21d2f..1482ba1a5bc6 100644
+index 111111111111..222222222222 100644
 --- a/drivers/pmdomain/arm/scmi_pm_domain.c
 +++ b/drivers/pmdomain/arm/scmi_pm_domain.c
 @@ -24,9 +24,35 @@ struct scmi_pm_domain {
@@ -268,17 +258,16 @@ index 3d73aef21d2f..1482ba1a5bc6 100644
  }
  
  static int scmi_pd_power_on(struct generic_pm_domain *domain)
-@@ -108,9 +134,16 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
+@@ -108,17 +134,25 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
  	scmi_pd_data->domains = domains;
  	scmi_pd_data->num_domains = num_domains;
  
 -	ret = of_genpd_add_provider_onecell(np, scmi_pd_data);
 -	if (ret)
 -		goto err_rm_genpds;
-+	/*
-+	 * Register the DT provider only when a device tree node is present.
-+	 * Under ACPI the domains are globally registered by pm_genpd_init()
-+	 * and consumers attach by name, so no onecell provider is needed.
++	/* Register DT provider if a device tree node is available.
++	 * Under ACPI, domains are still globally registered by
++	 * pm_genpd_init() and consumers attach by name.
 +	 */
 +	if (np) {
 +		ret = of_genpd_add_provider_onecell(np, scmi_pd_data);
@@ -287,22 +276,6 @@ index 3d73aef21d2f..1482ba1a5bc6 100644
 +	}
  
  	dev_set_drvdata(dev, scmi_pd_data);
- 
-@@ -118,16 +151,22 @@ static int scmi_pm_domain_probe(struct scmi_device *sdev)
- 	 * Parse (optional) power-domains-child-ids property to establish
- 	 * parent-child relationships.
- 	*/
--	ret = of_genpd_add_child_ids(np, scmi_pd_data);
--	if (ret < 0)
--		dev_err(dev, "Failed to add child domain hierarchy: %d\n", ret);
-+	if (np) {
-+		ret = of_genpd_add_child_ids(np, scmi_pd_data);
-+		if (ret < 0)
-+			dev_err(dev,
-+				"Failed to add child domain hierarchy: %d\n",
-+				ret);
-+	}
- 
  	dev_info(dev, "Initialized %d power domains", num_domains);
  
  	return 0;
@@ -316,23 +289,17 @@ index 3d73aef21d2f..1482ba1a5bc6 100644
  
  	return ret;
  }
-@@ -141,10 +180,11 @@ static void scmi_pm_domain_remove(struct scmi_device *sdev)
+@@ -130,7 +164,8 @@ static void scmi_pm_domain_remove(struct scmi_device *sdev)
+ 	struct device *dev = &sdev->dev;
+ 	struct device_node *np = dev->of_node;
+ 
+-	of_genpd_del_provider(np);
++	if (np)
++		of_genpd_del_provider(np);
  
  	scmi_pd_data = dev_get_drvdata(dev);
- 
--	/* Remove any parent-child relationships established at probe time */
--	of_genpd_remove_child_ids(np, scmi_pd_data);
--
--	of_genpd_del_provider(np);
-+	if (np) {
-+		/* Remove parent-child relationships established at probe */
-+		of_genpd_remove_child_ids(np, scmi_pd_data);
-+		of_genpd_del_provider(np);
-+	}
- 
  	for (i = 0; i < scmi_pd_data->num_domains; i++) {
- 		if (!scmi_pd_data->domains[i])
-@@ -165,7 +205,20 @@ static struct scmi_driver scmi_power_domain_driver = {
+@@ -152,7 +187,20 @@ static struct scmi_driver scmi_power_domain_driver = {
  	.remove = scmi_pm_domain_remove,
  	.id_table = scmi_id_table,
  };
@@ -354,7 +321,7 @@ index 3d73aef21d2f..1482ba1a5bc6 100644
  MODULE_AUTHOR("Sudeep Holla <sudeep.holla@arm.com>");
  MODULE_DESCRIPTION("ARM SCMI power domain driver");
 diff --git a/drivers/pmdomain/core.c b/drivers/pmdomain/core.c
-index 842c4169e290..9e932e4beb59 100644
+index 111111111111..222222222222 100644
 --- a/drivers/pmdomain/core.c
 +++ b/drivers/pmdomain/core.c
 @@ -23,6 +23,7 @@
@@ -365,7 +332,7 @@ index 842c4169e290..9e932e4beb59 100644
  
  /* Provides a unique ID for each genpd device */
  static DEFINE_IDA(genpd_ida);
-@@ -2463,6 +2464,33 @@ int pm_genpd_init(struct generic_pm_domain *genpd,
+@@ -2469,6 +2470,33 @@ int pm_genpd_init(struct generic_pm_domain *genpd,
  }
  EXPORT_SYMBOL_GPL(pm_genpd_init);
  
@@ -399,7 +366,7 @@ index 842c4169e290..9e932e4beb59 100644
  static int genpd_remove(struct generic_pm_domain *genpd)
  {
  	struct gpd_link *l, *link;
-@@ -2570,6 +2598,21 @@ static struct device *genpd_provider_bus;
+@@ -2572,6 +2600,21 @@ static DEFINE_MUTEX(of_genpd_mutex);
  /* Used to prevent registering devices before the bus. */
  static bool genpd_bus_registered;
  
@@ -522,7 +489,7 @@ index 842c4169e290..9e932e4beb59 100644
  /**
   * genpd_get_from_provider() - Look-up PM domain
   * @genpdspec: OF phandle args to use for look-up
-@@ -3432,6 +3569,86 @@ static int __genpd_dev_pm_attach(struct device *dev, struct device *base_dev,
+@@ -3265,6 +3402,86 @@ static int __genpd_dev_pm_attach(struct device *dev, struct device *base_dev,
  	return ret;
  }
  
@@ -609,7 +576,7 @@ index 842c4169e290..9e932e4beb59 100644
  /**
   * genpd_dev_pm_attach - Attach a device to its PM domain using DT.
   * @dev: Device to attach.
-@@ -3483,16 +3700,32 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
+@@ -3316,16 +3533,32 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
  {
  	struct device *virt_dev;
  	int num_domains;
@@ -649,7 +616,7 @@ index 842c4169e290..9e932e4beb59 100644
  
  	if (!genpd_bus_registered)
  		return ERR_PTR(-ENODEV);
-@@ -3505,7 +3738,8 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
+@@ -3338,7 +3571,8 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
  	dev_set_name(virt_dev, "genpd:%u:%s", index, dev_name(dev));
  	virt_dev->bus = &genpd_bus_type;
  	virt_dev->release = genpd_release_dev;
@@ -659,7 +626,7 @@ index 842c4169e290..9e932e4beb59 100644
  
  	ret = device_register(virt_dev);
  	if (ret) {
-@@ -3514,7 +3748,12 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
+@@ -3347,7 +3581,12 @@ struct device *genpd_dev_pm_attach_by_id(struct device *dev,
  	}
  
  	/* Try to attach the device to the PM domain at the specified index. */
@@ -673,7 +640,7 @@ index 842c4169e290..9e932e4beb59 100644
  	if (ret < 1) {
  		device_unregister(virt_dev);
  		return ret ? ERR_PTR(ret) : NULL;
-@@ -3532,19 +3771,24 @@ EXPORT_SYMBOL_GPL(genpd_dev_pm_attach_by_id);
+@@ -3365,19 +3604,24 @@ EXPORT_SYMBOL_GPL(genpd_dev_pm_attach_by_id);
   * @dev: The device used to lookup the PM domain.
   * @name: The name of the PM domain.
   *
@@ -704,7 +671,7 @@ index 842c4169e290..9e932e4beb59 100644
  		return NULL;
  
 diff --git a/include/linux/pm_domain.h b/include/linux/pm_domain.h
-index f925614aebdb..68589b0a8ee2 100644
+index 111111111111..222222222222 100644
 --- a/include/linux/pm_domain.h
 +++ b/include/linux/pm_domain.h
 @@ -318,6 +318,7 @@ int pm_genpd_remove_subdomain(struct generic_pm_domain *genpd,
@@ -737,7 +704,7 @@ index f925614aebdb..68589b0a8ee2 100644
  int of_genpd_add_device(const struct of_phandle_args *args, struct device *dev);
  int of_genpd_add_subdomain(const struct of_phandle_args *parent_spec,
  			   const struct of_phandle_args *subdomain_spec);
-@@ -492,6 +501,14 @@ static inline int of_genpd_add_provider_onecell(struct device_node *np,
+@@ -488,6 +497,14 @@ static inline int of_genpd_add_provider_onecell(struct device_node *np,
  
  static inline void of_genpd_del_provider(struct device_node *np) {}
  
@@ -754,7 +721,7 @@ index f925614aebdb..68589b0a8ee2 100644
  {
 diff --git a/include/linux/scmi_perf_domain.h b/include/linux/scmi_perf_domain.h
 new file mode 100644
-index 000000000000..4e3aadddbc43
+index 000000000000..111111111111
 --- /dev/null
 +++ b/include/linux/scmi_perf_domain.h
 @@ -0,0 +1,34 @@
@@ -792,3 +759,6 @@ index 000000000000..4e3aadddbc43
 +
 +#endif /* CONFIG_ARM_SCMI_PERF_DOMAIN */
 +#endif /* _LINUX_SCMI_PERF_DOMAIN_H */
+-- 
+Cixtech
+

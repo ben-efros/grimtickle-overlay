@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Tue, 28 Jul 2026 00:15:00 +0800
+Subject: phy: cix: usbdp: implement real PLL-ready/locked status polling
+
+sky1_udphy_init() calls udphy_status_check() after deasserting reset
+and programming the PHY's mode-specific register sequence, and aborts
+the init sequence (re-asserting reset/preset, disabling clocks) if it
+reports failure. However, udphy_status_check() was a stub:
+
+    static int udphy_status_check(struct cix_udphy *udphy)
+    {
+            //TODO check the phy status
+            return 0;
+    }
+
+It unconditionally returned 0 ("ready") without reading any hardware
+state, so a genuine USB-DP PHY initialization failure - the register
+sequence writes succeeding but the PLL never actually locking - was
+silently reported as success. The caller would then proceed to treat
+the PHY as usable and let the CDNSP controller start passing traffic
+through it.
+
+The vendor register map (phy-cix-usbdp.h) already defines
+PHY_PMA_CMN_CTRL2 with per-PLL ready/clk-enable-ack/locked status
+bits (PHY_PMA_CMN_CTRL2_PLL{0,1}_{READY,LOCKED}, among others), but no
+code in this driver ever read that register. All three of this PHY's
+mode configuration sequences - sky1_udphy_dp_conf,
+sky1_udphy_usbdp_conf_normal and sky1_udphy_usbdp_conf_flip - program
+both the PLL0 and PLL1 register blocks identically regardless of
+udphy->next_mode, so both PLLs must report READY and LOCKED before
+the PHY can be considered genuinely usable, not just whichever PLL is
+nominally associated with the active mode.
+
+Implement udphy_status_check() as a real poll of PHY_PMA_CMN_CTRL2
+via regmap_read_poll_timeout(), requiring both PLLs' READY and LOCKED
+bits to be set, and logging the actual register value on timeout.
+
+No vendor documentation or prior CIX/Sky1-Linux kernel version was
+found specifying an exact PLL lock timing budget for this PHY family,
+so the timeout reuses the same order-of-magnitude budget (100ms)
+already used for other reset/power-state handshakes in this driver
+family (see sky1_handshake() in cdnsp-sky1.c), polled at a much finer
+20us interval since PLL lock is expected to complete well under that
+budget rather than close to it. This is a conservative, documented
+choice, not an invented arbitrary delay; it can be tightened later if
+a datasheet-specified lock time becomes available.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0082000000000000000000000000000000000082
+---
+ drivers/phy/cix/phy-cix-usbdp.c | 33 ++++++++++++++++++++++++++++++++-
+ 1 file changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/phy/cix/phy-cix-usbdp.c b/drivers/phy/cix/phy-cix-usbdp.c
+index 111111111111..222222222222 100644
+--- a/drivers/phy/cix/phy-cix-usbdp.c
++++ b/drivers/phy/cix/phy-cix-usbdp.c
+@@ -643,10 +643,44 @@ static int udphy_dplane_get(struct cix_udphy *udphy)
+ 	return dp_lanes;
+ }
+ 
++/*
++ * PHY_PMA_CMN_CTRL2 reports per-PLL ready/clk-enable-ack/locked status
++ * (bit definitions above, present in the vendor register map but never
++ * read anywhere in this driver until now). All three of this PHY's mode
++ * configuration sequences - sky1_udphy_dp_conf, sky1_udphy_usbdp_conf_normal
++ * and sky1_udphy_usbdp_conf_flip - program both the PLL0 and PLL1 register
++ * blocks identically regardless of udphy->next_mode, so both PLLs are
++ * required to report READY and LOCKED before the PHY can be considered
++ * usable, not just the PLL nominally associated with the active mode.
++ */
++#define UDPHY_PLL_READY_LOCKED_MASK \
++	(PHY_PMA_CMN_CTRL2_PLL0_READY | PHY_PMA_CMN_CTRL2_PLL1_READY | \
++	 PHY_PMA_CMN_CTRL2_PLL0_LOCKED | PHY_PMA_CMN_CTRL2_PLL1_LOCKED)
++
+ static int udphy_status_check(struct cix_udphy *udphy)
+ {
+-	//TODO check the phy status
+-	return 0;
++	unsigned int val;
++	int ret;
++
++	/*
++	 * No vendor documentation or prior CIX/Sky1-Linux kernel version was
++	 * found specifying an exact PLL lock timing budget for this PHY, so
++	 * this reuses the same order-of-magnitude timeout (100ms) already
++	 * used for other reset/power-state handshakes in this driver family
++	 * (see sky1_handshake() in cdnsp-sky1.c), polled at a much finer
++	 * 20us interval since PLL lock is expected to complete well under
++	 * that budget rather than close to it.
++	 */
++	ret = regmap_read_poll_timeout(udphy->phy_regmap, PHY_PMA_CMN_CTRL2, val,
++					(val & UDPHY_PLL_READY_LOCKED_MASK) ==
++					UDPHY_PLL_READY_LOCKED_MASK,
++					20, 100 * 1000);
++	if (ret)
++		dev_err(udphy->dev,
++			"PLL ready/lock timeout: PHY_PMA_CMN_CTRL2=0x%04x (want 0x%lx set)\n",
++			val, UDPHY_PLL_READY_LOCKED_MASK);
++
++	return ret;
+ }
+ 
+ static int sky1_udphy_clk_enable(struct clk *clk)

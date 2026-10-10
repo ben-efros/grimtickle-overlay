@@ -1,0 +1,158 @@
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Subject: [PATCH] soc: cix: acpi-resource-lookup: bound the readiness wait so consumers cannot defer forever
+
+cix_acpi_resource_lookup_ready()/cix_acpi_resource_lookup_defer() only
+ever publish readiness from inside acpi_resource_lookup_probe()
+(CIXA1019's own .probe()). If that probe never runs at all - CIXA1019
+is absent from a given platform's ACPI namespace, its own driver
+registration failed, or (should CONFIG_CIX_ACPI_RESOURCE_LOOKUP ever
+become tristate, as the header's IS_REACHABLE() guard already
+anticipates) its module is simply never loaded - readiness is never
+published, and any consumer (CIX PHY/CDNSP drivers) relying on
+cix_acpi_resource_lookup_defer() to turn a transient -ENOENT into
+-EPROBE_DEFER during the injection window instead defers forever once
+it hits a *permanent* -ENOENT that CIXA1019 was never going to satisfy.
+The previous patch already correctly named this deferral "bounded" in
+its description, but nothing in the code actually bounded it.
+
+Add an explicit, bounded fallback:
+
+ - A late_initcall() (acpi_resource_lookup_late_init()) schedules a
+   delayed work item once boot has reached the point where every
+   built-in driver has had its initial probe attempt, if readiness is
+   not already published by then.
+ - The work item (acpi_resource_lookup_force_ready_work()) checks
+   acpi_dev_present("CIXA1019", NULL, -1): if the device is not
+   present at all, readiness is published immediately - nothing will
+   ever inject properties on this platform, so there is nothing left
+   to defer for.
+ - If CIXA1019 *is* present but still has not published readiness, the
+   work reschedules itself up to CIX_ACPI_RESOURCE_LOOKUP_MAX_WAIT_RETRIES
+   (20) times at CIX_ACPI_RESOURCE_LOOKUP_WAIT_INTERVAL (250 ms)
+   intervals (5 seconds total), then forces readiness anyway with a
+   loud dev_warn()-equivalent pr_warn(), on the reasoning that an
+   unbounded consumer defer is strictly worse than surfacing whatever
+   real error consumers hit at that point - a CIXA1019 that is present
+   but has not completed its (unconditionally-successful,
+   never-deferring) probe after 5 seconds indicates a genuine problem
+   elsewhere that this mechanism cannot fix, and should not be allowed
+   to masquerade as "everything is fine, keep waiting".
+ - These two constants are a software boot-policy choice (how long to
+   wait during boot before giving up on a stuck/absent provider), not
+   a hardware timing requirement, and are documented as such - unlike
+   PHY/reset sequencing delays, they do not model any register or
+   electrical characteristic and were not reverse-engineered from any
+   vendor source; they were chosen to be generously long for a one-time
+   boot-time wait while still bounding it to a human-noticeable-but-not
+   -indefinite window.
+
+This does not change behavior for the common, working case (CIXA1019
+present and probing normally): its probe still runs from the existing
+subsys_initcall-registered platform_driver exactly as before, still
+publishes readiness via the existing smp_store_release() as soon as
+injection completes, and the late_initcall's own delayed work exits
+immediately (no-op) once it observes readiness already true.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0085000000000000000000000000000000000085
+---
+ drivers/soc/cix/cix-acpi-resource-lookup.c | 73 ++++++++++++++++++++++++++++++
+ 1 file changed, 73 insertions(+)
+
+diff --git a/drivers/soc/cix/cix-acpi-resource-lookup.c b/drivers/soc/cix/cix-acpi-resource-lookup.c
+index 111111111111..222222222222 100644
+--- a/drivers/soc/cix/cix-acpi-resource-lookup.c
++++ b/drivers/soc/cix/cix-acpi-resource-lookup.c
+@@ -21,12 +21,14 @@
+ 
+ #include <linux/acpi.h>
+ #include <linux/device.h>
++#include <linux/jiffies.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <linux/soc/cix/cix-acpi-resource-lookup.h>
+ #include <linux/uuid.h>
++#include <linux/workqueue.h>
+ 
+ static struct acpi_device *acpi_obj_to_adev(const union acpi_object *obj)
+ {
+@@ -638,6 +640,77 @@ bool cix_acpi_resource_lookup_ready(void)
+ }
+ EXPORT_SYMBOL_GPL(cix_acpi_resource_lookup_ready);
+ 
++/*
++ * cix_acpi_resource_lookup_defer() only converts -ENOENT into
++ * -EPROBE_DEFER while readiness is false, so once CIXA1019 actually
++ * probes, consumers stop deferring. But if CIXA1019 never probes at
++ * all - its ACPI device is absent from this platform's namespace, its
++ * driver failed to register, or (in principle, since the symbol is
++ * bool-only today - see the header) it is ever made tristate and never
++ * loaded - readiness would otherwise never be published, and any
++ * consumer relying on cix_acpi_resource_lookup_defer() would defer
++ * forever instead of eventually seeing its real error.
++ *
++ * Bound that wait explicitly: starting at late_initcall (by which
++ * point every built-in driver's initial probe attempt, including any
++ * ACPI-namespace-order-dependent ones, has already run at least once),
++ * poll for CIXA1019's presence and for readiness a fixed, small number
++ * of times. If CIXA1019 is not present in the ACPI namespace at all,
++ * publish readiness immediately - nothing will ever inject properties,
++ * so there is nothing further to wait for. If it is present but still
++ * has not published readiness after the bounded wait, force readiness
++ * anyway and log loudly: something is wrong (a real bug elsewhere), but
++ * an unbounded consumer defer is worse than surfacing the consumers'
++ * real errors at that point.
++ *
++ * These constants are a software boot-policy choice (how long we are
++ * willing to wait during boot before giving up), not a hardware timing
++ * requirement - unlike PHY/reset sequencing delays, they are not meant
++ * to model any register/electrical characteristic.
++ */
++#define CIX_ACPI_RESOURCE_LOOKUP_MAX_WAIT_RETRIES 20
++#define CIX_ACPI_RESOURCE_LOOKUP_WAIT_INTERVAL msecs_to_jiffies(250)
++
++static void acpi_resource_lookup_force_ready_work(struct work_struct *work);
++static DECLARE_DELAYED_WORK(acpi_resource_lookup_force_ready_dwork,
++			     acpi_resource_lookup_force_ready_work);
++static unsigned int acpi_resource_lookup_wait_retries;
++
++static void acpi_resource_lookup_force_ready_work(struct work_struct *work)
++{
++	if (smp_load_acquire(&res_lookup_ready))
++		return; /* CIXA1019 completed injection on its own already. */
++
++	if (!acpi_dev_present("CIXA1019", NULL, -1)) {
++		pr_info("cix-acpi-resource-lookup: CIXA1019 not present in ACPI namespace; unblocking any deferred consumers\n");
++		smp_store_release(&res_lookup_ready, true);
++		return;
++	}
++
++	if (++acpi_resource_lookup_wait_retries >=
++	    CIX_ACPI_RESOURCE_LOOKUP_MAX_WAIT_RETRIES) {
++		pr_warn("cix-acpi-resource-lookup: CIXA1019 is present but has not completed injection after %u ms - forcing readiness so waiting consumers do not defer forever; their reset/clock/resource-name lookups may now fail instead\n",
++			jiffies_to_msecs(CIX_ACPI_RESOURCE_LOOKUP_MAX_WAIT_RETRIES *
++					  CIX_ACPI_RESOURCE_LOOKUP_WAIT_INTERVAL));
++		smp_store_release(&res_lookup_ready, true);
++		return;
++	}
++
++	schedule_delayed_work(&acpi_resource_lookup_force_ready_dwork,
++			      CIX_ACPI_RESOURCE_LOOKUP_WAIT_INTERVAL);
++}
++
++static int __init acpi_resource_lookup_late_init(void)
++{
++	if (acpi_disabled || smp_load_acquire(&res_lookup_ready))
++		return 0;
++
++	schedule_delayed_work(&acpi_resource_lookup_force_ready_dwork,
++			      CIX_ACPI_RESOURCE_LOOKUP_WAIT_INTERVAL);
++	return 0;
++}
++late_initcall(acpi_resource_lookup_late_init);
++
+ static int acpi_resource_lookup_probe(struct platform_device *pdev)
+ {
+ 	acpi_walk_namespace(ACPI_TYPE_ANY, ACPI_ROOT_OBJECT,

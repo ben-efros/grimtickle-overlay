@@ -1,8 +1,12 @@
 # 7.2.9 patch-set divergences — for review
 
-This records every change made to `files/7.1/` while getting the series to apply to
-Linux 7.2.9, plus what is still outstanding and the decisions that are yours to make.
-Nothing here changes kernel behaviour except where stated.
+This records every change made to the 7.2.9 patch set (`files/7.2/`) while getting the
+series to apply to Linux 7.2.9, plus what is still outstanding and the decisions that are
+yours to make. Nothing here changes kernel behaviour except where stated.
+
+> **Layout.** `files/7.0/` and `files/7.1/` remain the untouched 7.0.14 / 7.1.5 sets
+> (the ebuild globs `${KV_MAJOR}.${KV_MINOR}`). The 7.2.9 work lives in `files/7.2/`,
+> applied by `cix-sources-7.2.9.ebuild`.
 
 ## How the series was verified
 
@@ -18,7 +22,7 @@ curl -O https://distfiles.gentoo.org/pub/proj/kernel/genpatches/genpatches-7.2-1
 tar xJf genpatches-7.2-10.base.tar.xz; tar xJf genpatches-7.2-10.extras.tar.xz
 for p in $(ls *.patch | sort); do patch -p1 -s < "$p"; done   # -> SUBLEVEL = 9
 # then the overlay series, in the ebuild's glob order, strict context
-for p in $(ls sys-kernel/cix-sources/files/7.1/*.patch | sort); do
+for p in $(ls sys-kernel/cix-sources/files/7.2/*.patch | sort); do
     patch -p1 -F0 --no-backup-if-mismatch -s < "$p"
 done
 ```
