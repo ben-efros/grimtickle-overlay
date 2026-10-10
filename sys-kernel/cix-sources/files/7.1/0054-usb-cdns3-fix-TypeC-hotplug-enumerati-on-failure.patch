@@ -10,7 +10,7 @@ Subject: usb: cdns3: fix TypeC hotplug enumerati on failure
  3 files changed, 31 insertions(+)
 
 diff --git a/drivers/usb/cdns3/cdnsp-sky1.c b/drivers/usb/cdns3/cdnsp-sky1.c
-index 111111111111..222222222222 100644
+index 9c95f1f..54dae20 100644
 --- a/drivers/usb/cdns3/cdnsp-sky1.c
 +++ b/drivers/usb/cdns3/cdnsp-sky1.c
 @@ -460,6 +460,16 @@ static int cdnsp_sky1_drd_init(struct cdnsp_sky1 *data)
@@ -39,11 +39,11 @@ index 111111111111..222222222222 100644
  	/*
  	 * Only enable runtime PM D3 for OTG (USB-C) controllers where the
 diff --git a/drivers/usb/cdns3/core.c b/drivers/usb/cdns3/core.c
-index 111111111111..222222222222 100644
+index 504bdf1..9cba849 100644
 --- a/drivers/usb/cdns3/core.c
 +++ b/drivers/usb/cdns3/core.c
 @@ -74,6 +74,17 @@ static void cdns_exit_roles(struct cdns *cdns)
- 	cdns_drd_exit(cdns);
+ 		cdns_drd_exit(cdns);
  }
  
 +static int cdnsp_platform_reset(struct device *dev)
@@ -60,7 +60,7 @@ index 111111111111..222222222222 100644
  /**
   * cdns_core_init_role - initialize role of operation
   * @cdns: Pointer to cdns structure
-@@ -386,6 +397,14 @@ static int cdns_role_set(struct usb_role_switch *sw, enum usb_role role)
+@@ -376,6 +387,14 @@ static int cdns_role_set(struct usb_role_switch *sw, enum usb_role role)
  	}
  
  	cdns_role_stop(cdns);
@@ -76,7 +76,7 @@ index 111111111111..222222222222 100644
  	if (ret)
  		dev_err(cdns->dev, "set role %d has failed\n", role);
 diff --git a/drivers/usb/cdns3/core.h b/drivers/usb/cdns3/core.h
-index 111111111111..222222222222 100644
+index 8c492fd..fc23e19 100644
 --- a/drivers/usb/cdns3/core.h
 +++ b/drivers/usb/cdns3/core.h
 @@ -42,6 +42,7 @@ struct cdns_role_driver {
@@ -87,6 +87,3 @@ index 111111111111..222222222222 100644
  	unsigned long quirks;
  #define CDNS3_DEFAULT_PM_RUNTIME_ALLOW	BIT(0)
  #define CDNS3_DRD_SUSPEND_RESIDENCY_ENABLE	BIT(1)
--- 
-Cixtech
-
