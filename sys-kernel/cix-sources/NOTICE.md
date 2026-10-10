@@ -17,6 +17,7 @@ Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
 | `0003-mailbox-fix-acpi-driver-data-type-confusion.patch` | `…/patches-7.2/0085-firmware-arm_scmi-mailbox-fix-acpi-driver-data-type-confusion.patch` |
 | `0008-pmdomain-add-acpi-support-to-cix-soc.patch` | `…/patches-7.2/0077-pmdomain-add-acpi-support-to-cix-soc-NCZ-0008-forwar.patch` |
 | `0041-pmdomain-fix-dev_pm_domain_attach_by_name-for-sky1-m.patch` | `…/patches-7.2/0078-pmdomain-fix-dev_pm_domain_attach_by_name-for-sky1-m.patch` |
+| `0092-drm-panthor-sky1-power-on-via-raw-smc-scmi.patch` | `…/patches-7.2/0186-drm-panthor-sky1-power-on-GPU-via-raw-SMC-SCMI-before-first-MMIO.patch` |
 
 ## srcshelton / gentoo-ebuilds
 
