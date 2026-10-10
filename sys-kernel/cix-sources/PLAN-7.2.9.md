@@ -135,55 +135,84 @@ The first draft's findings were partly wrong. Corrected verdicts:
 | `0078` is the fix for the wedge | **UNVERIFIED** — only a boot test settles it. |
 | `0086` force-disables SuperSpeedPlus | **[corrected] NOT SUPPORTED BY THE DIFF.** Vendor `0025` defines `CFG_3XPORT_MODE_DIS_SSP (~(1 << 31))` and writes `v0 & CFG_3XPORT_MODE_DIS_SSP` to `XEC_CFG_3XPORT_MODE` (base+0x2040) — i.e. it clears **bit 31 only** and leaves every other bit. `0086` merely makes that branch unconditional (and it is a no-op entirely if firmware sets `u3-port-disable`, because of the `if/else if`). It cannot be shown to disable SSP; the commit message is unsupported. Obtain the register definition before shipping; consider making it opt-in. |
 
-### New risk introduced by `0078`
+### VERIFIED ON HARDWARE: `0078` storms, and its alert path is dead **[measured 2026-10-10]**
 
-`0078` **removes the last line-masking escape hatch**. The old driver did
-`-ESHUTDOWN` → `disable_irq_nosync()`, which at least stopped a storm; the ARA design
-has no equivalent, grouping means no single member can mask the line, and
-`smbus_alert()` returns `IRQ_HANDLED` **unconditionally** — so the kernel's
-"nobody cared" backstop cannot engage. If the ARA read NAKs while a chip holds the line
-low, the result is a permanent IRQ storm.
+Measured on the real target (`TinyTerror`, MS-R1, BIOS 1.0, kernel `7.1.5-cix`) over SSH.
+This is no longer inference.
 
-The assumption needing hardware proof: reading ARA (`0x0C`) must **deassert** the chip's
-alert output. Linux's `smbus_alert()` trusts this completely; the ChromeOS EC driver for
-the same RTS54xx silicon additionally loops `while (any_irq_gpio_asserted())`, implying
-it is not universally safe. If the board wires a generic INT rather than the
-SMBALERT#/ARA-arbitrating output, the level-low `IRQF_ONESHOT` handler re-fires forever.
-`0078`'s `irq_get_type() != IRQ_TYPE_LEVEL_LOW` warning checks a different, weaker property.
+| Measurement | Value |
+|---|---|
+| PD controllers | **two** — `i2c-CIXH200D:00` @0x30 and `:01` @0x31, **both on IRQ 144** |
+| Shared line | `gpio-7` = `PD01 GpioInt(0)`, `in lo IRQ ACTIVE LOW` — **held asserted** |
+| IRQ 144 rate | 46,674 interrupts in 6 s ≈ **7,800/s**; **1.15 billion** over 14.7 d uptime |
+| `irq/144-smbus_a` | **6.2 % CPU** continuously |
+| `nobody cared` in dmesg | **0** — the kernel backstop cannot engage |
+| ARA group (0078 debugfs) | `members=2 ara=registered`, trigger `0x8` (`LEVEL_LOW`) ✓ |
+| Both members | `online=1 faulted=0 offline_events=0` |
+| **Both members** | **`alerts=0`, `status_reads=1`, `irq_acks=0`** |
 
-### `0078` vs the alternatives — decide by firmware inspection, not by patch size
+`alerts` is incremented in `rts5453_alert()` immediately after its `protocol` and
+`removing`/`offline` guards, and both members are online — so **`alerts=0` proves the ARA
+dispatch never reached the driver at all**. `smbus_alert()` reads ARA (0x0C), gets nothing
+back, takes `if (status < 0) break;`, and returns `IRQ_HANDLED` **unconditionally** with the
+line still low. Because it claims the IRQ every time, the spurious-IRQ backstop can never
+fire — the storm is unbreakable by the kernel, exactly as predicted before the hardware was
+available. `0078` documents the hole itself: *"the generic ARA core owns IRQ request and
+dispatch entirely inside i2c-smbus.c; this driver has no hook into its per-IRQ … counts."*
 
-There are three ways to make two RTS5453 controllers coexist on one line:
+**Consequence beyond wasted CPU:** `irq_acks=0` means `I2C_INT_ACK_BIT` has never been
+written, so the line is never released — and because no alert ever arrives, the Type-C PD
+side is **frozen at its probe-time state**. Both ports read `[source] [host]` with a partner
+registered once at probe; any post-boot cable event, role swap, alt-mode/DP negotiation or
+PD renegotiation is invisible to the driver.
 
-| Option | Mechanism | Cost / risk |
-|---|---|---|
-| **A. Keep `0078`** (SMBus ARA) | Kernel-only; the generic `i2c-smbus` core owns the IRQ and dispatches by ARA address | 921 lines of IRQ/PM/lifetime work to rebase; **no storm mitigation** (above); necessity unproven because the root cause is undocumented |
-| **B. Minimal `IRQF_SHARED`** | Add `IRQF_SHARED` to the vendor driver's per-client request (~5 lines) — the vendor's actual defect was requesting *without* it | Cheapest; but `__setup_irq` rejects sharers whose **trigger types differ** (`kernel/irq/manage.c:1627`), so it works only if both descriptors agree |
-| **C. ACPI SSDT override** | Rewrite both PD controllers' `_CRS` `GpioInt` to `Shared` — what the sibling overlay does | Fixes the underlying firmware defect; needs an MS-R1 profile plus the `acpi-table-upgrade` initramfs machinery |
+**Fix authored: `0088-usb-typec-rts5453-ack-shared-irq-when-ara-silent.patch`.**
+NOT BUILT, NOT BOOT-TESTED. It keeps ARA as the primary dispatch and adds the missing hook:
+the group requests the *same* IRQ for itself with flags matching the ARA action exactly
+(`IRQF_SHARED | IRQF_ONESHOT` plus the established hardware trigger — mandatory, because
+`__setup_irq()` compares trigger bits against `irqd_get_trigger_type()` for every action
+after the first; `CONFIG_I2C_SMBUS=y` makes the ordering deterministic), acks each online
+member via the existing `rts5453_capture_and_clear_alert()`, and masks + re-arms the IRQ if
+the line will not clear after 8 rounds. Counters go to debugfs. Registration is best-effort
+so failure degrades to today's behaviour rather than breaking group start.
 
-**Evidence that reframes this.** The sibling's fix is **`o6`-scoped only**:
-`files/acpi-table-upgrade/o6/shared/ssdt/orion-o6-rts5453-shared-irq.asl` rewrites
-`\_SB.I2C1.PD10/PD11` to `GpioInt(Level, ActiveLow, Shared, …)`; `o6n/shared/ssdt/` has no
-equivalent, and `o6n/1.2/dsdt/DSDT.asl` declares only `\_SB.I2C5.PD10` (no `PD11`). So it
-provides **no** shared-IRQ fix for O6N/MS-R1, and its kernel side has no ARA at all — just
-per-client `IRQF_SHARED|IRQF_ONESHOT`.
+**Future option (deliberately not taken):** abandon the ARA-owned shared line for per-client
+`IRQF_SHARED` handlers that read each chip's registers directly — the approach used by the
+sibling overlay (`7.2.x/0026`) and ancestral to the vendor election `0078` replaced. It
+removes the ARA dependency entirely but gives up the "service only the alerting chip"
+property. Kept as a documented fallback.
 
-**Recommended sequence — one `acpidump` decides it:**
-1. Dump MS-R1's `_CRS` for both PD controllers and **compare trigger types**:
-   - same trigger ⇒ **option B** suffices and `0078` is unnecessary;
-   - different triggers ⇒ B cannot work; choose A or C.
-2. Confirm MS-R1 actually has **two** PD controllers. The sibling's O6N DSDT has only `PD10`;
-   if MS-R1 is likewise single-controller the problem is moot and `0078` is a no-op.
-3. If a firmware override is acceptable, prefer **C** (it fixes the real defect) and keep
-   `0078` as the fallback. Otherwise keep **A**.
-4. Whatever the dispatch outcome, **preserve `0078`'s design-independent work**: the partner
-   `ERR_PTR` guard (`0076`), capture/apply split, error preservation with offline latching,
-   the role cache updated only after a successful `usb_role_switch_set_role()`, per-group
-   IRQ/wake depth, and the probe unwind. Only the ARA *dispatch mechanism* is contentious.
+**Preserve regardless of dispatch design:** the partner `ERR_PTR` guard (`0076`),
+capture/apply split, error preservation with offline latching, the role cache updated only
+after a successful `usb_role_switch_set_role()`, per-group IRQ/wake depth, and the probe
+unwind. Only the ARA *dispatch mechanism* is at issue.
 
-**Boot test (either way):** keep `CONFIG_TYPEC_RTS5453=y`, do not blacklist. Watch for the ARA
-client banner and `register partner` on both ports, and for the absence of `irq N: nobody
-cared` and of a storm. If A ships, the storm mitigation above is **mandatory**.
+**Test plan:** boot with `0088`; expect `alerts`/`irq_acks` to advance and the IRQ 144 rate to
+collapse to near zero. Then confirm post-boot USB-C behaviour by plugging and unplugging a
+device on each Type-C port and watching `status_reads`, `alerts`, dmesg and `/sys/class/typec`.
+
+
+### Firmware facts measured on MS-R1 — the earlier open questions are answered
+
+Everything below was read from the live target, so it no longer needs to be guessed:
+
+| Question | Answer |
+|---|---|
+| PD controllers | **two** (`CIXH200D:00` 0x30, `:01` 0x31), both on IRQ 144, trigger `0x8` = `LEVEL_LOW` |
+| Shared line | `gpio-7`, `PD01 GpioInt(0)`, active low, held asserted |
+| `module_blacklist` needed? | **No.** `CONFIG_TYPEC_RTS5453=y` is confirmed in `/tmp/config`; keep built-in |
+| PCIe firmware models | **both** `PNP0A08` (×5) **and** `CIXH2020` (×5) present; MCFG OEM Table ID = **`SKY1EDK2`** |
+| Root ports on this BIOS 1.0 | enumerate as `1f6c:0001`, **not** `17cd:0100` — the ncz USB-wrapper collision warning does not apply here |
+| GPU power | DSDT has `CIXH5000`/`CIXH5001`/`GPUP`/`power-supply`; the running kernel uses the raw SMC path and panthor comes up cleanly |
+| USB PHYs in use | `cix-usb3-phy CIXH2034`, `cix-usbdp-phy CIXH2033:00-03`, `cix-pcie-phy CIXH2023:00-02` — all bound |
+| SMMU storm | no SMMU dmesg activity, no storm — ncz `0100`/`0106`/`0108` are not needed here |
+| NPU / VPU | neither loaded (no `aipu`/`armchina`/`amvx` modules) — unused on this box |
+
+The sibling overlay's shared-IRQ fix is `o6`-scoped only
+(`files/acpi-table-upgrade/o6/shared/ssdt/orion-o6-rts5453-shared-irq.asl` rewrites
+`\_SB.I2C1.PD10/PD11` to a `Shared` `GpioInt`; `o6n/` has no equivalent), so it offers **no**
+MS-R1 fix — which is why the in-kernel `0088` route was taken instead.
+
 
 ## Phase A — prepare (host-independent)
 

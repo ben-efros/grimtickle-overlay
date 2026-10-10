@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] usb: typec: rts5453: ack the shared IRQ even when ARA is silent
+
+STATUS: NOT BUILT, NOT BOOT-TESTED. Authored from a live diagnosis of
+MS-R1 ("TinyTerror", kernel 7.1.5-cix, BIOS 1.0) on 2026-10-10. Applies
+after 0076 and 0078. Hunk line numbers are derived from the post-0078
+file; apply with `patch -p1 -F3` or adjust context if needed.
+
+Problem (measured on hardware, not inferred)
+--------------------------------------------
+MS-R1 wires two RTS5453 PD controllers (i2c-3 addresses 0x30 and 0x31,
+ACPI CIXH200D:00/:01) to one active-low GpioInt, which lands on Linux
+IRQ 144 (trigger type 0x8 = IRQ_TYPE_LEVEL_LOW).
+
+0078 hands that IRQ to the generic SMBus ARA core
+(i2c_new_smbus_alert_device(); smbus_alert() in drivers/i2c/i2c-smbus.c)
+and never requests the IRQ itself. On this board no chip answers an ARA
+read at 0x0C, so smbus_alert() takes its `if (status < 0) break;` path,
+falls through, and returns IRQ_HANDLED *unconditionally* while the line
+is still asserted. Because the handler claims the IRQ every time, the
+kernel's "nobody cared" spurious-IRQ backstop can never engage, so
+nothing breaks the loop.
+
+Live evidence:
+  /proc/interrupts  144: <1.15e9>  cdns-gpio  7 Level  smbus_alert
+                    46,674 interrupts in 6 s (~7,800/s) at 14.7 d uptime
+  irq/144-smbus_a   ~6.2% CPU continuously
+  dmesg             zero "nobody cared" occurrences
+  debugfs (0078)    members=2, ara=registered, alerts=0 on BOTH members,
+                    status_reads=1, irq_acks=0, offline_events=0
+  gpio-7            "PD01 GpioInt(0) in lo IRQ ACTIVE LOW" - held low
+
+`alerts` is incremented immediately after the protocol/removing/offline
+guards in rts5453_alert(), and both members report online=1 faulted=0, so
+alerts=0 proves the ARA dispatch never reached this driver at all. The
+driver has therefore never written I2C_INT_ACK_BIT: irq_acks=0. That
+missing ack is why the line is never released. 0078 documents the hole
+itself: "the generic ARA core owns IRQ request and dispatch entirely
+inside i2c-smbus.c; this driver has no hook into its per-IRQ ... counts".
+
+Consequence beyond the wasted CPU: no alert ever arrives, so the Type-C
+PD side is frozen at its probe-time state. Both ports reported
+[source] [host] with a partner registered once at probe; any post-boot
+cable event, role swap, alt-mode/DP negotiation or PD renegotiation is
+invisible to the driver.
+
+What this does
+--------------
+Keeps ARA as the primary dispatch path and adds the missing hook, so the
+driver can act when ARA is silent:
+
+  1. The group requests the same physical IRQ for itself with flags
+     matching the ARA client's action exactly (IRQF_SHARED | IRQF_ONESHOT
+     plus the already-established hardware trigger type). The trigger bits
+     are required: __setup_irq() rejects any action after the first whose
+     trigger bits differ from irqd_get_trigger_type()
+     (kernel/irq/manage.c:1620-1629). With CONFIG_I2C_SMBUS=y the ARA
+     client probes synchronously inside i2c_new_smbus_alert_device(), so
+     the hardware trigger type is already set when this handler registers.
+  2. Every interrupt acks each online member through the existing
+     rts5453_capture_and_clear_alert(), which writes I2C_INT_ACK_BIT via
+     rts5453_capture_status_locked(rts, true) and so deasserts SMBALERT#
+     and ends the storm. Where ARA does work the callback runs too; the
+     extra status read is cheap and the apply path is already
+     change-guarded.
+  3. If the line still will not clear after RTS5453_STORM_NO_PROGRESS_MAX
+     rounds the handler masks the IRQ (disable_irq_nosync() - a blocking
+     disable_irq() would deadlock inside the threaded handler) and
+     schedules a re-arm, so a transient condition recovers instead of
+     permanently killing PD. Counters are exposed in debugfs.
+
+Registration is best-effort: if it fails the code warns once and carries
+on with ARA-only behaviour, i.e. it degrades to today's behaviour rather
+than failing group start.
+
+Future option (deliberately not taken here)
+-------------------------------------------
+The alternative is to stop sharing the line through the ARA core and go
+back to per-client IRQF_SHARED handlers that read each chip's status and
+control registers directly - the approach used by the sibling srcshelton
+overlay (7.2.x/0026), and ancestral to the vendor
+rts5453h_irq_rts_handle() election that 0078 replaced. That drops the ARA
+dependency entirely but gives up the "only the alerting chip is serviced"
+property, which is why 0078 moved away from it. Kept as a documented
+fallback, not the primary path.
+
+---
+
+--- a/drivers/usb/typec/rts5453.c
++++ b/drivers/usb/typec/rts5453.c
+@@ -255,6 +255,19 @@ struct rts5453_irq_group {
+ 	unsigned int wake_depth;
+ 
+ 	struct dentry *debugfs_dir;
++
++	/*
++	 * ARA is the primary dispatch path, but it cannot report "line
++	 * asserted and no chip answered". This guard handler supplies the
++	 * missing ack so the shared line is actually released; see the
++	 * patch preamble.
++	 */
++	bool guard_irq;
++	bool storm_masked;
++	unsigned int no_progress;
++	atomic64_t direct_services;
++	atomic64_t storm_breaks;
++	struct delayed_work storm_rearm_work;
+ };
+ 
+ static LIST_HEAD(rts5453_irq_groups);
+@@ -900,6 +913,87 @@ static int rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
+ 		disable_irq_wake(group->irq);
+ }
+ 
++/*
++ * Bounded storm containment for the shared PD interrupt. Eight consecutive
++ * rounds in which servicing the members did not release the line is treated
++ * as a stuck source: the IRQ is masked and re-armed later rather than left
++ * to spin forever. On MS-R1 it otherwise spins at ~7.8 kHz indefinitely,
++ * because smbus_alert() always reports IRQ_HANDLED and so defeats the
++ * kernel's spurious-interrupt handling.
++ */
++#define RTS5453_STORM_NO_PROGRESS_MAX	8
++#define RTS5453_STORM_REARM_MS		5000
++
++/*
++ * Ack every online member of the group. rts5453_capture_and_clear_alert()
++ * writes I2C_INT_ACK_BIT (and HPD_IRQ_ACK when set), which is what actually
++ * deasserts the chip's interrupt output; without it a level-triggered shared
++ * line can never be released.
++ */
++static void rts5453_group_service_members(struct rts5453_irq_group *group)
++{
++	struct rts5453h *rts;
++
++	mutex_lock(&group->members_lock);
++	list_for_each_entry(rts, &group->members, irq_node) {
++		if (READ_ONCE(rts->removing) || READ_ONCE(rts->offline))
++			continue;
++
++		if (rts5453_capture_and_clear_alert(rts) == 0) {
++			atomic64_inc(&group->direct_services);
++			schedule_delayed_work(&rts->apply_work, 0);
++		}
++	}
++	mutex_unlock(&group->members_lock);
++}
++
++static void rts5453_group_storm_rearm(struct work_struct *work)
++{
++	struct rts5453_irq_group *group =
++		container_of(to_delayed_work(work), struct rts5453_irq_group,
++			     storm_rearm_work);
++
++	group->no_progress = 0;
++	group->storm_masked = false;
++	enable_irq(group->irq);
++}
++
++/*
++ * Safety-net handler for the ARA-owned line. Registered after the ARA client
++ * exists, with matching flags and trigger type, so both actions coexist on
++ * the same shared IRQ.
++ */
++static irqreturn_t rts5453_group_irq_handler(int irq, void *data)
++{
++	struct rts5453_irq_group *group = data;
++
++	rts5453_group_service_members(group);
++
++	if (++group->no_progress < RTS5453_STORM_NO_PROGRESS_MAX)
++		return IRQ_HANDLED;
++
++	/*
++	 * Still asserted after repeatedly acking every member. Mask the line
++	 * and retry later. disable_irq_nosync() is required: the blocking
++	 * disable_irq() waits for this very handler to finish.
++	 */
++	group->no_progress = 0;
++	atomic64_inc(&group->storm_breaks);
++	dev_warn_ratelimited(&group->adapter->dev,
++			     "RTS5453 shared IRQ %d did not clear after %u acks; masking and re-arming in %u ms\n",
++			     irq, RTS5453_STORM_NO_PROGRESS_MAX,
++			     RTS5453_STORM_REARM_MS);
++	group->storm_masked = true;
++	disable_irq_nosync(irq);
++	schedule_delayed_work(&group->storm_rearm_work,
++			      msecs_to_jiffies(RTS5453_STORM_REARM_MS));
++
++	return IRQ_HANDLED;
++}
++
+ /*
+  * Hand the physical IRQ to the generic SMBus ARA core after all members on
+  * this (adapter, IRQ) pair have joined. See the long comment above
+@@ -948,6 +1042,29 @@ static int rts5453_group_start(struct rts5453_irq_group *group)
+ 			group->adapter->nr, group->irq, ret);
+ 		return ret;
+ 	}
+ 
++	/*
++	 * ARA owns the line, but it cannot tell us that the line is asserted
++	 * while nobody answers. Register our own shared handler so members
++	 * still get acked (and the line released) in that case. The trigger
++	 * bits must be the hardware's, not zero: __setup_irq() compares them
++	 * against irqd_get_trigger_type() for every action after the first.
++	 */
++	ret = request_threaded_irq(group->irq, NULL, rts5453_group_irq_handler,
++				   IRQF_SHARED | IRQF_ONESHOT |
++				   group->trigger_type,
++				   "rts5453h-ara-guard", group);
++	if (ret) {
++		dev_warn(&group->adapter->dev,
++			 "RTS5453 shared IRQ %d: guard handler not registered (%d); continuing ARA-only\n",
++			 group->irq, ret);
++	} else {
++		group->guard_irq = true;
++		dev_info(&group->adapter->dev,
++			 "RTS5453 shared IRQ %d: guard handler registered (trigger=0x%x)\n",
++			 group->irq, group->trigger_type);
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1088,6 +1205,7 @@ static int rts5453_group_join(struct rts5453h *rts)
+ 		INIT_LIST_HEAD(&group->members);
+ 		mutex_init(&group->members_lock);
+ 		mutex_init(&group->pm_lock);
++		INIT_DELAYED_WORK(&group->storm_rearm_work,
++				  rts5453_group_storm_rearm);
+ 		refcount_set(&group->refs, 1);
+ 		group->adapter = client->adapter;
+ 		group->irq = client->irq;
+@@ -1010,6 +1128,11 @@ static int rts5453_group_counters_show(struct seq_file *s, void *unused)
+ 	seq_printf(s, "irq_disable_depth=%u wake_depth=%u\n",
+ 		   group->irq_disable_depth, group->wake_depth);
+ 	mutex_unlock(&group->pm_lock);
++	seq_printf(s, "guard_irq=%u direct_services=%lld storm_breaks=%lld no_progress=%u\n",
++		   (unsigned int)group->guard_irq,
++		   (long long)atomic64_read(&group->direct_services),
++		   (long long)atomic64_read(&group->storm_breaks),
++		   group->no_progress);
+ 	return 0;
+ }
+ 
+@@ -1248,6 +1371,16 @@ static void rts5453_group_leave(struct rts5453h *rts)
+ 	 * here; this driver never requests the physical IRQ itself.
+ 	 */
+ 	if (group->ara_client)
+ 		i2c_unregister_device(group->ara_client);
+ 
++	/*
++	 * The guard handler is ours (and is not devres-managed by the ARA
++	 * client), so it must be released explicitly, before the group is
++	 * freed. Cancel the re-arm first so it cannot enable_irq() after
++	 * free_irq().
++	 */
++	cancel_delayed_work_sync(&group->storm_rearm_work);
++	if (group->guard_irq) {
++		/*
++		 * Re-balance a mask left behind by the storm breaker, or
++		 * free_irq() would see an unbalanced disable.
++		 */
++		if (group->storm_masked) {
++			group->storm_masked = false;
++			enable_irq(group->irq);
++		}
++		free_irq(group->irq, group);
++	}
++
+ 	debugfs_remove_recursive(group->debugfs_dir);
+-- 
+2.54.0
