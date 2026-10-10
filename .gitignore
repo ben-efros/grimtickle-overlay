@@ -1,2 +1,10 @@
 *.code-workspace
 node_modules/
+
+# Local scratch and secrets -- never commit.
+.dsh-ssh/
+.ncz-review/
+.scratch-agent/
+
+# Patch-application test harness (not part of the repo).
+.patchwork/

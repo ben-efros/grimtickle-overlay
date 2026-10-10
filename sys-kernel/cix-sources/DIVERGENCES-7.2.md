@@ -27,9 +27,9 @@ done
 can "succeed" with drifted context. Anything that needed fuzz was rebased until it applied
 at `-F0`.
 
-**Result:** 81/95 clean before this work, **91/93 clean now**. The two still failing are
-listed at the end; they are entangled with the 7.2 cdns3 unification and need the USB
-architecture restructure, not a Kconfig patch.
+**Result:** 81/95 clean before this work, **82/82 clean now** (the 11-patch CIX USB host
+chain is deferred, below). The deferred USB work is entangled with the 7.2 cdns3
+unification and needs the USB architecture restructure, not a Kconfig patch.
 
 Rebased patches were produced by applying at fuzz, then regenerating with `git diff`
 against the committed pre-state, then re-verifying at `-F0`. That preserves the patch's
@@ -110,19 +110,33 @@ Removed: `0038`, `0040`, `0087` — subsumed by the adopted panthor patch, which
 > instead of forced ACE-Lite. It applies cleanly, but GPU bring-up must be re-verified on
 > MS-R1 before this is called done.
 
-## 5. Still failing — the two USB Kconfig patches
+## 5. Deferred — the whole CIX USB host chain (11 patches)
 
-These cannot be fixed by context adjustment, and forcing them would produce a
-silently-broken Kconfig, so they were left failing on purpose.
+The vendor USB host support is one atomic unit, not two patches. `0025` **creates** the
+vendor split driver (`cdnsp-plat.c`/`cdnsp-sky1.c`) and its Kconfig/Makefile, and nine more
+patches modify those files or stack on changes they make. Deferring only `0025` made those
+nine fail (their target files no longer exist), so the entire chain is deferred to keep the
+tree buildable.
 
-| Patch | Failure | Why a Kconfig-only fix is wrong |
-|---|---|---|
-| `0025-usb-add-usb-cdns3-driver-for-cix-soc.patch` | `usb/cdns3/Kconfig` 3/3, `Makefile` 1/1 | This is the pre-7.2 vendor split (`cdnsp-plat.c`/`cdnsp-sky1.c` plus a separate `USB_CDNSP`/`USB_CDNSP_GADGET` tree). 7.2 unified cdns3 and removed that split; the patch even references `USB_CDNSP_GADGET`, which is **not defined** in 7.2. The correct 7.2-native form is `srcshelton 7.2.x/0025`: delete the vendor split, bind through mainline `cdns3-plat.c` (ACPI match `CIXH2031`) plus a thin `cdns3-sky1.c` wrapper. |
-| `0084-soc-cix-add-cix-sky1-usb-kconfig-umbrella.patch` | `usb/cdns3/Kconfig` 2/2, `usb/typec/Kconfig` | Its `cdns3/Kconfig` hunks target `USB_CDNSP_SKY1`, which only exists once `0025` is resolved. Its `typec`/`phy`/`soc` hunks are independent and can be salvaged separately. |
+Deferred as `.deferred` (same convention as `0083` and the xhci-plat patch):
+`0025`, `0054`, `0061`, `0062`, `0065`, `0068`, `0075`, `0077`, `0081`, `0084`, `0086`.
 
-**Open decision:** extend the adoption to USB (`srcshelton 7.2.x/0025` + `0027` + `60010`,
-re-targeting the local `0075`/`0081`/`0086`, which patch the vendor `cdnsp-sky1.c`). This is
-an architecture change, not a cherry-pick, and was outside the approved scope for this pass.
+**Consequence for the boot test:** the kernel builds and brings up GPU + Type-C PD (rts5453,
+including `0088`), but the CIX USB *data* host driver is absent — only mainline cdns3
+(`cdns3-plat.c`) remains. Build-time note: keep `CONFIG_I2C_SMBUS=y` and
+`CONFIG_TYPEC_RTS5453=y` in the config (they are set on the live box); `0084` normally
+selects `I2C_SMBUS`, but it is deferred.
+
+| Patch | Role in the chain |
+|---|---|
+| `0025` | creates the vendor `cdnsp-plat.c`/`cdnsp-sky1.c` + Kconfig/Makefile |
+| `0054`, `0061`, `0062`, `0065`, `0068`, `0075`, `0077`, `0081`, `0086` | patch those files / stack on their changes |
+| `0084` | Kconfig umbrella; its `cdns3/Kconfig` hunks target `USB_CDNSP_SKY1` |
+
+**Open decision (unchanged):** the correct fix is the 7.2-native restructure
+(`srcshelton 7.2.x/0025` + `0027` + `60010`, re-targeting the deferred patches), not a
+Kconfig-only patch — the vendor split predates 7.2's cdns3 unification and even references
+`USB_CDNSP_GADGET`, which 7.2 does not define.
 
 ## 6. Reproducing this
 
