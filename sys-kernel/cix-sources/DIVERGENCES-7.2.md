@@ -27,8 +27,9 @@ done
 can "succeed" with drifted context. Anything that needed fuzz was rebased until it applied
 at `-F0`.
 
-**Result:** 81/95 clean before this work, **90/95 clean now**. The five still failing are
-listed at the end; they need replacement or authoring, not rebasing.
+**Result:** 81/95 clean before this work, **91/93 clean now**. The two still failing are
+listed at the end; they are entangled with the 7.2 cdns3 unification and need the USB
+architecture restructure, not a Kconfig patch.
 
 Rebased patches were produced by applying at fuzz, then regenerating with `git diff`
 against the committed pre-state, then re-verifying at `-F0`. That preserves the patch's
@@ -87,32 +88,43 @@ verified anchors and emitting the patch with `git diff`, and now applies at `-F0
 Still **NOT BUILT, NOT BOOT-TESTED**. See `PLAN-7.2.9.md` for the measured evidence and
 the test plan.
 
-## 4. Still failing — needs your decision, not a rebase
+## 4. Adopted (third-party replacements, with attribution)
 
-None of these can be fixed by context adjustment: they fail even at fuzz 3 because the
-code they target was restructured. Forcing them would silently produce wrong code, so they
-were left failing on purpose.
+Three of the original failures were resolved by adopting the verified third-party
+replacements. Provenance is in `NOTICE.md`, and each adopted patch carries a `Source:`
+header; where the upstream file had a `From:`/`Subject:` preamble it was preserved verbatim.
 
-| Patch | Failure | Verified remedy (not applied) |
+| Was | Now | Source |
 |---|---|---|
-| `0003-firmware-arm_scmi-add-acpi-support-to-SCMI.patch` | 12 of 44 hunks (bus.c 2/7, common.h 2/5, driver.c 8/18) | Replace with ncz `0075` (+ `0085`), measured **0 failures** at `-F0` against a v7.2.9 tree. Do **not** hand-resolve: the obvious fix produces `device_set_node(&scmi_dev->dev, np)` with no reference taken, where 7.2.9 has `of_fwnode_handle(of_node_get(np))` and `scmi_device_release()` does `of_node_put` — a lost fwnode ref per child device. Alternative: `srcshelton 7.2.x/0003`, a 738-line rewrite against the 7.2 transport-supplier model |
-| `0008-pmdomain-add-acpi-support-to-cix-soc.patch` | 2 of 4 hunks | Replace with ncz `0077` + `0078`. `0077` is content-identical to this patch plus `if (np)` guards for 7.2's `of_genpd_add_child_ids()`; `0078` is the overlay's `0041`, which `0077` absorbs |
-| `0011-drm-panthor-add-acpi-support-for-cix-p1.patch` | 6 hunks across `panthor_device.c`, `panthor_gem.c`, `panthor_gpu.c` | Superseded by the vendor `00111`-`00116` rework. Vendor `00111`/`00113`/`00116` apply cleanly to 7.2.9 but **`00112` and `00114` do not** (mainline moved `panthor_gpu_coherency_init()` from `panthor_device.c` to `panthor_gpu.c` and re-signed `should_map_wc()`). `srcshelton 7.2.x/0011` is the working replacement and additionally fixes `gpu_clk_stacks`, which nothing else does |
-| `0025-usb-add-usb-cdns3-driver-for-cix-soc.patch` | `usb/cdns3/Kconfig` 3/3, `Makefile` 1/1 | Authoring: 7.2 unified `USB_CDNS3`, so the patch's "platform `USB_CDNSP` + PCI `USB_CDNSP_PCI`" split must be re-expressed inside 7.2's `if USB_CDNS3 … endif` block. The patch's source-file hunks (the new `cdnsp-sky1.c` etc.) apply fine; only the two Kconfig/Makefile hunks fail |
-| `0084-soc-cix-add-cix-sky1-usb-kconfig-umbrella.patch` | `usb/cdns3/Kconfig` 2/2, `usb/typec/Kconfig` | Same cause as `0025` |
+| `0003` SCMI (12/44) | `0003-firmware-arm_scmi-add-acpi-support-to-SCMI.patch` | ncz `0075` (forward-port; documents and preserves the fwnode reference-counting a naive rebase loses) |
+| — | `0003-mailbox-fix-acpi-driver-data-type-confusion.patch` | ncz `0085` |
+| `0008` pmdomain (2/4) | `0008-pmdomain-add-acpi-support-to-cix-soc.patch` | ncz `0077` |
+| `0041` pmdomain | `0041-pmdomain-fix-dev_pm_domain_attach_by_name-for-sky1-m.patch` | ncz `0078` |
+| `0011` panthor (+`0038`/`0040`/`0087`) | `0011-drm-panthor-add-sky1-acpi-support.patch` | srcshelton `7.2.x/0011` |
 
-### A licensing decision is bundled into the remedies above
+Removed: `0038`, `0040`, `0087` — subsumed by the adopted panthor patch, which also fixes
+`gpu_clk_stacks` and the `selected_coherency` UAPI regression found live on MS-R1.
 
-The named replacements (`ncz 0075/0077/0078`, `srcshelton 7.2.x/0011`) are **third-party**
-code. Neither project has a repo-level LICENSE file; their patch text is a GPL-2 derivative
-of kernel sources, but the *rewrite* authorship is unattributed in-file (of srcshelton's
-142 patches, 8 carry a `Source:` line, 1 a `Signed-off-by`, 0 an `Upstream-Status`). If you
-adopt them, the honest form is: preserve each patch preamble verbatim, add a `NOTICE`
-crediting the project and the pinned vendor commit, keep `EGIT_CIX_COMMIT` in the ebuild,
-and add a `metadata.xml`. **Not done here** — importing third-party patches into a public
-overlay is your call, not mine.
+> **Panthor caveat — needs an on-device test.** The adopted `0011` changes the GPU power-on
+> path (ACPI `PowerResource` instead of the raw SMC SCMI) and makes coherency `_CCA`-driven
+> instead of forced ACE-Lite. It applies cleanly, but GPU bring-up must be re-verified on
+> MS-R1 before this is called done.
 
-## 5. Reproducing this
+## 5. Still failing — the two USB Kconfig patches
+
+These cannot be fixed by context adjustment, and forcing them would produce a
+silently-broken Kconfig, so they were left failing on purpose.
+
+| Patch | Failure | Why a Kconfig-only fix is wrong |
+|---|---|---|
+| `0025-usb-add-usb-cdns3-driver-for-cix-soc.patch` | `usb/cdns3/Kconfig` 3/3, `Makefile` 1/1 | This is the pre-7.2 vendor split (`cdnsp-plat.c`/`cdnsp-sky1.c` plus a separate `USB_CDNSP`/`USB_CDNSP_GADGET` tree). 7.2 unified cdns3 and removed that split; the patch even references `USB_CDNSP_GADGET`, which is **not defined** in 7.2. The correct 7.2-native form is `srcshelton 7.2.x/0025`: delete the vendor split, bind through mainline `cdns3-plat.c` (ACPI match `CIXH2031`) plus a thin `cdns3-sky1.c` wrapper. |
+| `0084-soc-cix-add-cix-sky1-usb-kconfig-umbrella.patch` | `usb/cdns3/Kconfig` 2/2, `usb/typec/Kconfig` | Its `cdns3/Kconfig` hunks target `USB_CDNSP_SKY1`, which only exists once `0025` is resolved. Its `typec`/`phy`/`soc` hunks are independent and can be salvaged separately. |
+
+**Open decision:** extend the adoption to USB (`srcshelton 7.2.x/0025` + `0027` + `60010`,
+re-targeting the local `0075`/`0081`/`0086`, which patch the vendor `cdnsp-sky1.c`). This is
+an architecture change, not a cherry-pick, and was outside the approved scope for this pass.
+
+## 6. Reproducing this
 
 The harness lives in `.patchwork/` (gitignored, ~2 GB) and is rebuilt by the commands at
 the top of this document. Two helpers were used:
