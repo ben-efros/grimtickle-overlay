@@ -301,19 +301,3 @@ index 111111111111..222222222222 100644
  	u32 supported_encoding = BIT(DRM_COLOR_YCBCR_BT601) |
  				 BIT(DRM_COLOR_YCBCR_BT709);
  	u32 supported_range = BIT(DRM_COLOR_YCBCR_LIMITED_RANGE) |
-diff --git a/drivers/gpu/drm/drm_atomic.c b/drivers/gpu/drm/drm_atomic.c
-index 111111111111..222222222222 100644
---- a/drivers/gpu/drm/drm_atomic.c
-+++ b/drivers/gpu/drm/drm_atomic.c
-@@ -471,7 +471,7 @@ static void drm_atomic_crtc_print_state(struct drm_printer *p,
- 	drm_printf(p, "\tactive_changed=%d\n", state->active_changed);
- 	drm_printf(p, "\tconnectors_changed=%d\n", state->connectors_changed);
- 	drm_printf(p, "\tcolor_mgmt_changed=%d\n", state->color_mgmt_changed);
--	drm_printf(p, "\tplane_mask=%llx\n", state->plane_mask);
-+	drm_printf(p, "\tplane_mask=%x\n", state->plane_mask);
- 	drm_printf(p, "\tconnector_mask=%x\n", state->connector_mask);
- 	drm_printf(p, "\tencoder_mask=%x\n", state->encoder_mask);
- 	drm_printf(p, "\tmode: " DRM_MODE_FMT "\n", DRM_MODE_ARG(&state->mode));
--- 
-Cixtech
-
