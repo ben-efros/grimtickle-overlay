@@ -84,11 +84,11 @@ dependency entirely but gives up the "only the alerting chip is serviced"
 property, which is why 0078 moved away from it. Kept as a documented
 fallback, not the primary path.
 
----
-
+diff --git a/drivers/usb/typec/rts5453.c b/drivers/usb/typec/rts5453.c
+index e5de1fb..3a8ae90 100644
 --- a/drivers/usb/typec/rts5453.c
 +++ b/drivers/usb/typec/rts5453.c
-@@ -255,6 +255,19 @@ struct rts5453_irq_group {
+@@ -129,6 +129,19 @@ struct rts5453_irq_group {
  	unsigned int wake_depth;
  
  	struct dentry *debugfs_dir;
@@ -97,7 +97,7 @@ fallback, not the primary path.
 +	 * ARA is the primary dispatch path, but it cannot report "line
 +	 * asserted and no chip answered". This guard handler supplies the
 +	 * missing ack so the shared line is actually released; see the
-+	 * patch preamble.
++	 * comment on rts5453_group_irq_handler().
 +	 */
 +	bool guard_irq;
 +	bool storm_masked;
@@ -108,8 +108,8 @@ fallback, not the primary path.
  };
  
  static LIST_HEAD(rts5453_irq_groups);
-@@ -900,6 +913,87 @@ static int rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
- 		disable_irq_wake(group->irq);
+@@ -921,6 +934,89 @@ static void rts5453_group_irq_wake_disable(struct rts5453_irq_group *group)
+ 	mutex_unlock(&group->pm_lock);
  }
  
 +/*
@@ -158,9 +158,14 @@ fallback, not the primary path.
 +}
 +
 +/*
-+ * Safety-net handler for the ARA-owned line. Registered after the ARA client
-+ * exists, with matching flags and trigger type, so both actions coexist on
-+ * the same shared IRQ.
++ * Safety-net handler for the ARA-owned line. 0078 hands the physical IRQ to
++ * the generic SMBus ARA core, which cannot tell the driver that the line is
++ * asserted while no chip answers the ARA read - smbus_alert() simply returns
++ * IRQ_HANDLED and the level-triggered line re-fires forever. This handler is
++ * registered in addition to the ARA client, with the same flags and trigger
++ * type, and supplies the missing ack; when ARA does dispatch, its callback
++ * runs as before and this handler's extra status read is harmless because
++ * the apply path is already change-guarded.
 + */
 +static irqreturn_t rts5453_group_irq_handler(int irq, void *data)
 +{
@@ -177,12 +182,12 @@ fallback, not the primary path.
 +	 * disable_irq() waits for this very handler to finish.
 +	 */
 +	group->no_progress = 0;
++	group->storm_masked = true;
 +	atomic64_inc(&group->storm_breaks);
 +	dev_warn_ratelimited(&group->adapter->dev,
 +			     "RTS5453 shared IRQ %d did not clear after %u acks; masking and re-arming in %u ms\n",
 +			     irq, RTS5453_STORM_NO_PROGRESS_MAX,
 +			     RTS5453_STORM_REARM_MS);
-+	group->storm_masked = true;
 +	disable_irq_nosync(irq);
 +	schedule_delayed_work(&group->storm_rearm_work,
 +			      msecs_to_jiffies(RTS5453_STORM_REARM_MS));
@@ -190,11 +195,10 @@ fallback, not the primary path.
 +	return IRQ_HANDLED;
 +}
 +
- /*
-  * Hand the physical IRQ to the generic SMBus ARA core after all members on
-  * this (adapter, IRQ) pair have joined. See the long comment above
-@@ -948,6 +1042,29 @@ static int rts5453_group_start(struct rts5453_irq_group *group)
- 			group->adapter->nr, group->irq, ret);
+ static ssize_t disable_pd_interrupt_show(struct device *dev,
+ 		struct device_attribute *attr,
+ 		char *buf)
+@@ -1041,6 +1137,28 @@ static int rts5453_group_start(struct rts5453_irq_group *group)
  		return ret;
  	}
  
@@ -223,16 +227,7 @@ fallback, not the primary path.
  	return 0;
  }
  
-@@ -1088,6 +1205,7 @@ static int rts5453_group_join(struct rts5453h *rts)
- 		INIT_LIST_HEAD(&group->members);
- 		mutex_init(&group->members_lock);
- 		mutex_init(&group->pm_lock);
-+		INIT_DELAYED_WORK(&group->storm_rearm_work,
-+				  rts5453_group_storm_rearm);
- 		refcount_set(&group->refs, 1);
- 		group->adapter = client->adapter;
- 		group->irq = client->irq;
-@@ -1010,6 +1128,11 @@ static int rts5453_group_counters_show(struct seq_file *s, void *unused)
+@@ -1079,6 +1197,11 @@ static int rts5453_group_counters_show(struct seq_file *s, void *unused)
  	seq_printf(s, "irq_disable_depth=%u wake_depth=%u\n",
  		   group->irq_disable_depth, group->wake_depth);
  	mutex_unlock(&group->pm_lock);
@@ -243,16 +238,30 @@ fallback, not the primary path.
 +		   group->no_progress);
  	return 0;
  }
- 
-@@ -1248,6 +1371,16 @@ static void rts5453_group_leave(struct rts5453h *rts)
- 	 * here; this driver never requests the physical IRQ itself.
+ DEFINE_SHOW_ATTRIBUTE(rts5453_group_counters);
+@@ -1157,6 +1280,8 @@ static int rts5453_group_join(struct rts5453h *rts)
+ 		INIT_LIST_HEAD(&group->members);
+ 		mutex_init(&group->members_lock);
+ 		mutex_init(&group->pm_lock);
++		INIT_DELAYED_WORK(&group->storm_rearm_work,
++				  rts5453_group_storm_rearm);
+ 		refcount_set(&group->refs, 1);
+ 		group->adapter = client->adapter;
+ 		group->irq = client->irq;
+@@ -1297,11 +1422,31 @@ static void rts5453_group_leave(struct rts5453h *rts)
+ 	 * IRQ, via free_irq(), which itself blocks until any currently
+ 	 * running instance of the threaded handler completes. No manual
+ 	 * disable_irq()/synchronize_irq()/free_irq() sequence is needed
+-	 * here; this driver never requests the physical IRQ itself.
++	 * here for the ARA client; the guard handler added below is requested
++	 * separately and is therefore freed explicitly.
  	 */
  	if (group->ara_client)
  		i2c_unregister_device(group->ara_client);
  
 +	/*
-+	 * The guard handler is ours (and is not devres-managed by the ARA
-+	 * client), so it must be released explicitly, before the group is
++	 * The guard handler is ours and is not devres-managed by the ARA
++	 * client, so it must be released explicitly before the group is
 +	 * freed. Cancel the re-arm first so it cannot enable_irq() after
 +	 * free_irq().
 +	 */
@@ -270,5 +279,5 @@ fallback, not the primary path.
 +	}
 +
  	debugfs_remove_recursive(group->debugfs_dir);
--- 
-2.54.0
+ 
+ 	mutex_destroy(&group->members_lock);
