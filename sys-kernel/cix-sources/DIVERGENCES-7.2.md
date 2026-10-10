@@ -27,9 +27,9 @@ done
 can "succeed" with drifted context. Anything that needed fuzz was rebased until it applied
 at `-F0`.
 
-**Result:** 81/95 clean before this work, **82/82 clean now** (the 11-patch CIX USB host
-chain is deferred, below). The deferred USB work is entangled with the 7.2 cdns3
-unification and needs the USB architecture restructure, not a Kconfig patch.
+**Result:** 81/95 clean before this work, **85/85 clean now**. The USB host chain was
+resolved via the srcshelton 7.2-native restructure (section 5); only two pre-existing
+patches remain deferred (`0083` phy, xhci-plat LPM).
 
 Rebased patches were produced by applying at fuzz, then regenerating with `git diff`
 against the committed pre-state, then re-verifying at `-F0`. That preserves the patch's
@@ -110,33 +110,30 @@ Removed: `0038`, `0040`, `0087` — subsumed by the adopted panthor patch, which
 > instead of forced ACE-Lite. It applies cleanly, but GPU bring-up must be re-verified on
 > MS-R1 before this is called done.
 
-## 5. Deferred — the whole CIX USB host chain (11 patches)
+## 5. Resolved — USB host chain via the srcshelton restructure
 
-The vendor USB host support is one atomic unit, not two patches. `0025` **creates** the
-vendor split driver (`cdnsp-plat.c`/`cdnsp-sky1.c`) and its Kconfig/Makefile, and nine more
-patches modify those files or stack on changes they make. Deferring only `0025` made those
-nine fail (their target files no longer exist), so the entire chain is deferred to keep the
-tree buildable.
+USB is a hard requirement, so the vendor host chain was resolved with the sibling's
+7.2-native architecture instead of being deferred. The vendor split
+(`cdnsp-plat.c`/`cdnsp-sky1.c` plus a separate `USB_CDNSP` subsystem) predates 7.2's cdns3
+unification and cannot be fixed by context adjustment — it is replaced, not rebased.
 
-Deferred as `.deferred` (same convention as `0083` and the xhci-plat patch):
-`0025`, `0054`, `0061`, `0062`, `0065`, `0068`, `0075`, `0077`, `0081`, `0084`, `0086`.
-
-**Consequence for the boot test:** the kernel builds and brings up GPU + Type-C PD (rts5453,
-including `0088`), but the CIX USB *data* host driver is absent — only mainline cdns3
-(`cdns3-plat.c`) remains. Build-time note: keep `CONFIG_I2C_SMBUS=y` and
-`CONFIG_TYPEC_RTS5453=y` in the config (they are set on the live box); `0084` normally
-selects `I2C_SMBUS`, but it is deferred.
-
-| Patch | Role in the chain |
+| Vendor (removed) | Replacement |
 |---|---|
-| `0025` | creates the vendor `cdnsp-plat.c`/`cdnsp-sky1.c` + Kconfig/Makefile |
-| `0054`, `0061`, `0062`, `0065`, `0068`, `0075`, `0077`, `0081`, `0086` | patch those files / stack on their changes |
-| `0084` | Kconfig umbrella; its `cdns3/Kconfig` hunks target `USB_CDNSP_SKY1` |
+| `0025` usb cdns3 driver (vendor split) | `0025-usb-cdns3-add-audited-sky1-platform-support.patch` (srcshelton `7.2.x/0025`) |
+| `0029`, `0054`, `0061`, `0062`, `0065`, `0068`, `0075`, `0077`, `0081`, `0086` | absorbed into `0025` (valid posted-write/restore/PHY-readiness concepts) or removed as unsafe workarounds |
+| `0084` Kconfig umbrella | re-expressed as `0090` (rts5453 + PHY ACPI deps only) |
+| — | `0089` (srcshelton `60010`) declares the USB/DP PHY dependency |
 
-**Open decision (unchanged):** the correct fix is the 7.2-native restructure
-(`srcshelton 7.2.x/0025` + `0027` + `60010`, re-targeting the deferred patches), not a
-Kconfig-only patch — the vendor split predates 7.2's cdns3 unification and even references
-`USB_CDNSP_GADGET`, which 7.2 does not define.
+Kept as-is (coherent with our tree and applying cleanly): vendor `0027` (ACPI USB
+scan/arbitration — coherent with `0007`'s `soc/cix`), vendor `0024` PHY + `0072`/`0073`/`0082`
+fixes, and our rts5453 (`0026`/`0076`/`0078`/`0088`, the ARA design).
+
+Still deferred (pre-existing, unrelated to the host chain): `0083` (usbdp pll polling) and
+the xhci-plat LPM autodetect patch.
+
+> **Untested.** The adopted `0025`/`0089` host stack and `0090` have not been compiled or
+> booted here (no ARM64 toolchain); USB bring-up must be validated in the on-device boot
+> test, exactly like the panthor change and `0088`.
 
 ## 6. Reproducing this
 

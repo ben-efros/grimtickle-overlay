@@ -1,0 +1,73 @@
+From: grimtickle-overlay (local)
+Subject: [PATCH] usb: typec: rts5453 & phy: declare ACPI/role-switch/ARA deps
+
+Restore the Kconfig dependencies that the USB host-chain deferral removed
+along with the CIX_SKY1_USB umbrella, now expressed directly where they
+belong (they are independent of the host controller):
+
+- TYPEC_RTS5453: USB_ROLE_SWITCH is a hard dependency (the driver calls
+  usb_role_switch lookup/set); ACPI || OF is required because the chips
+  are ACPI-described on Sky1; and I2C_SMBUS is selected because the
+  shared-IRQ ARA client (i2c_new_smbus_alert_device(), see 0078/0088) is
+  serviced by the smbus_alert driver.
+- PHY_CIX_PCIE/USB2/USB3/USBDP: these are ACPI-described on Sky1
+  (CIXH2023/CIXH2034/CIXH2033), so OF-only is wrong for an ACPI boot and
+  silently hides the PHY options in menuconfig.
+
+Authored against the post-adoption tree (84-patch series); applies at -F0.
+---
+diff --git a/drivers/phy/cix/Kconfig b/drivers/phy/cix/Kconfig
+index 8bd979d..301a269 100644
+--- a/drivers/phy/cix/Kconfig
++++ b/drivers/phy/cix/Kconfig
+@@ -3,7 +3,7 @@
+ config PHY_CIX_PCIE
+ 	bool "CIX Sky1 PCIe PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	select GENERIC_PHY
+ 	help
+ 	  Enable this to support the PCIe PHY on CIX Sky1 SoCs.
+@@ -13,7 +13,7 @@ config PHY_CIX_PCIE
+ config PHY_CIX_USB2
+ 	bool "CIX Sky1 USB2 PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	select GENERIC_PHY
+ 	help
+ 	  Enable this to support the USB2 PHY on CIX Sky1 SoCs.
+@@ -21,7 +21,7 @@ config PHY_CIX_USB2
+ config PHY_CIX_USB3
+ 	bool "CIX Sky1 USB3 PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	select GENERIC_PHY
+ 	help
+ 	  Enable this to support the USB3 PHY on CIX Sky1 SoCs.
+@@ -29,7 +29,7 @@ config PHY_CIX_USB3
+ config PHY_CIX_USBDP
+ 	tristate "CIX Sky1 USB-DP combo PHY driver"
+ 	depends on ARCH_CIX || COMPILE_TEST
+-	depends on OF
++	depends on ACPI || OF
+ 	depends on TYPEC
+ 	select GENERIC_PHY
+ 	help
+diff --git a/drivers/usb/typec/Kconfig b/drivers/usb/typec/Kconfig
+index fb2814c..bc77fa9 100644
+--- a/drivers/usb/typec/Kconfig
++++ b/drivers/usb/typec/Kconfig
+@@ -114,7 +114,10 @@ config TYPEC_RTS5453
+ 	tristate "Realtek RTS5453 Type-C PD controller driver"
+ 	depends on I2C
+ 	depends on TYPEC
++	depends on USB_ROLE_SWITCH
++	depends on ACPI || OF
+ 	select REGMAP_I2C
++	select I2C_SMBUS
+ 	help
+ 	  Say Y or M here if your system has a Realtek RTS5453H USB Type-C
+ 	  Power Delivery controller. This controller handles USB PD negotiation,

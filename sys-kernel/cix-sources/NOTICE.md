@@ -25,6 +25,8 @@ A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebui
 | Overlay patch | Source |
 |---|---|
 | `0011-drm-panthor-add-sky1-acpi-support.patch` | `sys-kernel/cix-sources/files/7.2.x/0011-drm-panthor-add-sky1-acpi-support.patch` |
+| `0025-usb-cdns3-add-audited-sky1-platform-support.patch` | `sys-kernel/cix-sources/files/7.2.x/0025-usb-cdns3-add-audited-sky1-platform-support.patch` |
+| `0089-usb-cdns3-sky1-declare-phy-dependency.patch` | `sys-kernel/cix-sources/files/7.2.x/60010-usb-cdns3-sky1-declare-phy-dependency.patch` |
 
 The panthor patch's upstream file carries **no in-file author, `Source:`, or
 `Signed-off-by`**; the overlay it came from pins the vendor base
