@@ -195,6 +195,8 @@ clocks and no SError in `panthor_hw_init`; ARA client banner + no IRQ storm on t
 ports; TC ports enumerate; NVMe present (a clockless apb/pclk path shows up as missing NVMe).
 **B4.** If the SMMU event-queue storm is observed, evaluate the bypass-STE/ATS approach
 (ncz `0100`, verified 7.2.9-clean) rather than disabling the event queue blindly.
+**B5.** Validate the VA-API stack per the section above — by inspecting decoded frames, not
+by exit status or dropped-frame counters.
 
 ## QA / mechanics notes **[corrected: new section]**
 
@@ -211,6 +213,62 @@ ports; TC ports enumerate; NVMe present (a clockless apb/pclk path shows up as m
   does **not** correspond to this overlay's. Match by kernel file, never by number.
 - ncz `0070` and `0073` mutually cancel on `sound/pci/hda/hda_cix_ipbloq.c`; any tooling that
   filters by file instead of replaying the ordered series will mis-reconstruct the tree.
+
+## VA-API / hardware transcode (cross-package) **[added 2026-10-10]**
+
+Jellyfin hardware transcode on Sky1 is real but **less mature than it looks**, and it is
+**not part of `cix-sources`** — it is a userspace stack (VA-API driver + libva + ffmpeg)
+sitting on a kernel VPU/V4L2 path. It is tracked here so it cannot be forgotten, but it must
+not be dropped into `files/7.2` without first establishing which side of the boundary the
+patches belong to.
+
+Measured capability:
+
+| Codec | Status |
+|---|---|
+| H.264 1080p decode (ffmpeg VA-API) | works |
+| H.264 encode | works |
+| HEVC encode | works |
+| VP9 | works |
+| AV1 decode | works via a **separate V4L2 path**, not VA-API |
+| **HEVC decode** | **inconclusive / untested** — this matters, HEVC is the common 4K codec |
+
+**Hard dependency — a gate, not an optimisation: six `cix-vaapi` patches are required.
+Without them hardware decode does not work at all.**
+
+**Provenance is unresolved and must be settled before this task is called done.**
+A search for `vaapi` finds **nothing** in this overlay, in the ncz 7.2 corpus, or in the
+srcshelton overlay. The only VA-API artefact located is ncz's `cix-vaapi_1.0.0.bb`, which
+packages a **closed-source vendor `.deb`**:
+
+```
+LICENSE = "CLOSED"
+LICENSE_FLAGS = "commercial_cix-mm"
+SRC_URI = "file:///mnt/.../cix-mm-1.0.0.tar.gz"   # local SDK tarball, not public
+```
+
+and ncz's own multimedia README marks the whole slice **DEFERRED** ("No recipes shipped").
+So:
+- Locate the six patches, record their origin, and establish their licence.
+- If they touch closed-source vendor binaries they must **not** go into this public
+  repository. Keep them local, or gate them behind a USE flag / a separate local overlay,
+  the way ncz gates its vendor stack behind `LICENSE_FLAGS_ACCEPTED`.
+- Decide which side of the boundary each patch belongs to: **kernel-side** (V4L2 / `amvx`)
+  patches belong in `files/7.2` and should be listed here; **userspace** patches belong in a
+  `cix-vaapi` / ffmpeg package, not in `cix-sources`.
+
+**Kernel-side dependency.** VA-API needs a working VPU kernel path — this overlay's
+`sys-kernel/cix-vpu-driver` (out-of-tree `amvx`) plus V4L2 plumbing. The VPU is the least
+settled part of the CIX stack: ncz shipped an **SError-masking workaround** (DAIF masking +
+`ESB` around every VPU/RCSU MMIO access) rather than a root cause, and left a trail of
+abandoned power/clock attempts. Budget for the VPU path on 7.2.9 and do not assume the
+existing out-of-tree driver is sufficient.
+
+**Validation must check output correctness, not just "it ran".** Every observed failure was
+**silent** — including one that produced **flat green video at full framerate with zero
+dropped frames**. Any pass/fail gate based on ffmpeg exit status, transcode completion, or
+dropped-frame counters will report success on broken output. Verify per codec by decoding a
+known clip and inspecting actual frames, on real 4K HEVC content.
 
 ## Optional / later
 
@@ -248,3 +306,7 @@ ports; TC ports enumerate; NVMe present (a clockless apb/pclk path shows up as m
   `CONFIG_USB_CDNS3_PCI_WRAP`/`USB_CDNSP_PCI` unset? (The wrapper's match table is
   `PCI_VDEVICE(CDNS, 0x0100)` and Sky1 root ports enumerate as `17cd:0100`; binding it
   NULL-derefs in `cdns3_pci_probe`.)
+- **Where are the six `cix-vaapi` patches, what licence are they under, and are they
+  kernel-side or userspace?** They are not in this overlay, the ncz 7.2 corpus, or the
+  srcshelton overlay. This blocks the VA-API/transcode task and must be settled before it
+  can be scheduled.
