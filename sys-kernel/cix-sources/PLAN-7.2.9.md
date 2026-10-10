@@ -36,10 +36,10 @@ There is no `/tmp/config`, no `/root/rebuild-ramdisk.sh`, and no `/usr/src/*` he
 - **Phase A (patch/ebuild preparation)** — host-independent, runs anywhere.
 - **Phase B (build, install, boot test)** — **must** run on the ARM64 target.
 
-## Reference implementation: `srcshelton/gentoo-ebuilds` **[corrected: new section]**
+## Reference implementation: `srcshelton/gentoo-ebuilds` — adoption assessment
 
-A **sibling Gentoo overlay has already completed this forward-port**. It consumes the
-same vendor base (`cixtech/cix-linux-main` `patches-7.1`, pinned at
+A **sibling Gentoo overlay has already completed this forward-port**. It consumes the same
+vendor base (`cixtech/cix-linux-main` `patches-7.1`, pinned at
 `bc078a383042a6c14b05c56e12390e422f893088` — the vendor panthor-rework commit).
 
 - `sys-kernel/cix-sources/cix-sources-7.2.9.ebuild` (931 lines; also 7.2.7, 7.2.8, 6.18.54/55)
@@ -47,20 +47,80 @@ same vendor base (`cixtech/cix-linux-main` `patches-7.1`, pinned at
 - `files/` top level — 54 `.patch` files (50 numbered `20050`…`90098`) plus ASL and Kconfig
   tooling; the ordered `post_vendor_patches` array holds 97 active entries drawn from both
   `files/` and `files/7.2.x/`
-- `files/acpi-table-upgrade/` — 28 SSDT/DSDT/IORT ASL sources
-- It answers task A4 directly: `K_WANT_GENPATCHES="base extras experimental"`,
-  `K_GENPATCHES_VER="10"`, `K_NO_VERSION_CHECK=0`, `KEYWORDS="arm arm64"`.
-- It uses a **fully custom `src_prepare()`** (a `cix_apply_patch()` case statement
-  plus an ordered `post_vendor_patches` array), so it does **not** use this overlay's
-  `${KV_MAJOR}.${KV_MINOR}` glob and is unaffected by the glob-order hazard below.
+- `files/acpi-table-upgrade/` — 28 SSDT/DSDT/IORT ASL sources (`o6/`, `o6n/`, `shared/`)
+- Answers task A4: `K_WANT_GENPATCHES="base extras experimental"`, `K_GENPATCHES_VER="10"`,
+  `K_NO_VERSION_CHECK=0`, `KEYWORDS="arm arm64"`, `K_NOUSEPR=1`, `K_SECURITY_UNSUPPORTED=1`.
+  Its Manifest pins **`linux-7.2.tar.xz` + `genpatches-7.2-10.*`** — the point release comes
+  from genpatches, which is why those two variables matter.
 
-**This is not a drop-in.** Its policy is more conservative: it quarantines `.files/7.1/0033`
-(regulator) as unsafe and skips vendor `0030/0031/0032/0035/0037/0039/0045/0046/0047/0049/0050/0051/0052/0053/0055/0057/0059/0063/0064/0066/0070`, replacing some with safer post-vendor
-patches. Adopting it wholesale would remove capabilities this overlay currently ships.
+**It is not self-contained and not a drop-in.** `src_prepare()` unpacks the vendor tarball and
+replaces only **28 of the 71 vendor ordinals** it names; the other 43 are dropped, and unmapped
+patches (`00100`, `1001`-`1008`, `0043`, `0053`, `0057`) are applied **verbatim from the vendor
+tree**. So reuse means porting individual rewrites, not importing a tree.
 
-Adoption cost, licensing and per-subsystem divergence are under investigation; the
-outcome should be recorded here before A3 starts. **Evaluate before hand-authoring
-`files/7.2`.**
+### Recommended adoption mode: C3 (hybrid)
+
+Keep `files/7.2/` + the glob for our own set; append an explicit `post_vendor_patches` array
+copied from the sibling's ebuild (minus the ACPI-only `30125`) and `eapply` it after the glob.
+Roughly **100 ebuild lines and 50-100 files**, versus 931 lines and 141 files for wholesale —
+and it preserves our `files/7.2/` layout, `IUSE=""`, `K_NOUSEPR` behaviour and `src_install`.
+
+- Wholesale payload is ~9 MB (ebuild + 88 + 50 top-level). Skip `files/6.18.x/` (5.2 MB, not
+  needed) and the whole `acpi-table-upgrade` machinery (~2.1 MB + `iasl`/python BDEPEND).
+  Regenerating a Manifest needs ~154 MiB of downloads.
+- `metadata/layout.conf` needs **no** change. The sibling's Manifest is thick
+  (`thin-manifests` unset) while ours is thin; Portage tolerates both and
+  `ebuild … manifest` emits a thin one.
+- If the glob is kept, adopting any additional 4-digit fix requires replacing the glob with an
+  explicit ordered list (see the glob-order hazard in QA notes).
+
+### Adopt — high value, low risk
+
+| Sibling patch | Why |
+|---|---|
+| `7.2.x/70150` | **The real 64-plane fix** — see A3; our `00101`/`1009` pair does not actually achieve it |
+| `7.2.x/70140`, `7.2.x/70130` | The `drm_atomic_state`→`drm_atomic_commit` and `drm_panel_init`→`devm_drm_panel_alloc` ports we still lack |
+| `7.2.x/0003` | A full 7.2-native SCMI rewrite (738 L, 8 files): `device_node`→`fwnode_handle` throughout, `__acpi_match` transport slot, hardened `scmi_match_by_id_table()`. The 12/44 hunk failures our `0003` hits do not arise. Compare against ncz `0075` and take the better one |
+| `7.2.x/0011` | Panthor: ACPI `PowerResource` power-on, IP reset + RCSU `0x218`, `gpu_clk_core` **and `gpu_clk_stacks`**, and it leaves mainline `panthor_gpu_coherency_init()` intact so `selected_coherency` stays correct |
+| `7.2.x/0005`, `7.2.x/0006` | AUDSS clk + reset hardening, same design, plus rate-programming rollback and PM-lifetime fixes. `0005` re-bases the CLKT bridge on **provider fwnode + index** with atomic publication, which structurally removes the late-SCMI re-map problem |
+| `7.2.x/0018` | Allocates `con_id` strings instead of raising `MAX_CON_ID` — better than our constant bump |
+| `7.2.x/0025` | The **v7.2-native USB role-init architecture** — see A3 |
+| `7.2.x/0009`, `7.2.x/0012`, `7.2.x/0021`+`0023`, `7.2.x/0060`, `30129`+`30128`, `20050`, `40042`, `40046`, `40055`, `40093`, `50060`, `80070`, `90045` | DSP remoteproc, PDC wake domain, ACPI-native SOF + debugfs lifetime, safer devfreq cooling, thermal IPA, and generic-core fixes. `30129` replaces our unbuildable IPA (`0052`) |
+
+### Do NOT adopt
+
+- **The PCIe model.** It deletes the CIX vendor PCIe driver and relies on generic PNP0A08 +
+  firmware ECAM (`40070` arbitrates *toward* PNP0A08, away from CIXH2020). Verified: the Sky1
+  PCIe host is **not** upstream in v7.2.9 (`pcie-sky1.c`, `cadence/pcie-sky1.c`,
+  `cadence/pci-sky1-cix.c` all 404; no `sky1`/`cix` in `drivers/pci/controller/{Kconfig,Makefile}`);
+  its `PCI_SKY1_HOST` driver exists only in their `6.18.x/` series. **If MS-R1 firmware exposes
+  only CIXH2020, this model has no PCIe driver at all — not degraded PCIe, no NVMe.** Keep our
+  vendor PCIe driver; layer `40093`/`40046`/`80070` on top, which are generic and independent.
+- **`7.2.x/0024` as a *replacement*.** It carries the USBDP combo PHY only; `phy-cix-usb2.c`,
+  `phy-cix-usb3.c` and `phy-cix-pcie.c` are deliberately absent, and the O6N DSDT still declares
+  10x CIXH2032 and 3x CIXH2023 with no driver. Take it as an *addition* for CIXH2033 and keep our
+  USB2/USB3 PHY code with `0072`/`0073`/`0082`.
+- **Its in-tree NPU/VPU/ISP** unless the out-of-tree `cix-npu-driver`/`cix-vpu-driver` packages
+  are retired: duplicate `armchina_aipu_alloc_dma_buf` symbols and a colliding `amvx.ko` name
+  (see A5).
+- **Its RTS5453 shared-IRQ solution** — see Task 0; the firmware table is `o6`-only.
+
+### Hard prerequisites (one `acpidump` on MS-R1 answers all three)
+
+1. Does firmware expose **PNP0A08 + working ECAM**? Decides whether the PCIe model is even viable.
+2. Does the DMI/MCFG match `CIXTEK`/`SKY1EDK2` and `Radxa Orion O6/O6N`? Gates many patches
+   (`30127`, `80000`, `80010`, `80020`, `90040`, `80070`, `40070`) — they are inert on other boards.
+3. Does the DSDT expose the GPU `mali-supply`/`power-supply` PowerResource? The sibling's power-on
+   path requires it; ours (raw SMC SCMI) does not. **The two paths are not interchangeable.**
+
+### Licensing and attribution
+
+Neither overlay has a repo-level `LICENSE`; patches are GPL-2 derivatives of kernel code, and the
+sibling's rewrite authorship is unattributed in-file (8 of 142 patches carry a `Source:` preamble,
+1 a `Signed-off-by`, 0 an `Upstream-Status`). If we copy: **preserve each patch preamble verbatim,
+add a `NOTICE` crediting `srcshelton/gentoo-ebuilds` and the pinned `cix-linux-main` commit, carry
+`EGIT_CIX_COMMIT` in the ebuild so the preferred-form source is recorded, add a `metadata.xml`,
+and do not present their audits as our own.**
 
 ## Task 0 (gate): rts5453 / IRQ routing — verdicts
 
@@ -91,9 +151,39 @@ it is not universally safe. If the board wires a generic INT rather than the
 SMBALERT#/ARA-arbitrating output, the level-low `IRQF_ONESHOT` handler re-fires forever.
 `0078`'s `irq_get_type() != IRQ_TYPE_LEVEL_LOW` warning checks a different, weaker property.
 
-**Boot-test protocol:** keep `CONFIG_TYPEC_RTS5453=y`, do not blacklist. Watch for the ARA
-client banner, `register partner` on both ports, absence of `irq N: nobody cared`, and
-absence of a storm. If the wedge appears, retest without `0078`.
+### `0078` vs the alternatives — decide by firmware inspection, not by patch size
+
+There are three ways to make two RTS5453 controllers coexist on one line:
+
+| Option | Mechanism | Cost / risk |
+|---|---|---|
+| **A. Keep `0078`** (SMBus ARA) | Kernel-only; the generic `i2c-smbus` core owns the IRQ and dispatches by ARA address | 921 lines of IRQ/PM/lifetime work to rebase; **no storm mitigation** (above); necessity unproven because the root cause is undocumented |
+| **B. Minimal `IRQF_SHARED`** | Add `IRQF_SHARED` to the vendor driver's per-client request (~5 lines) — the vendor's actual defect was requesting *without* it | Cheapest; but `__setup_irq` rejects sharers whose **trigger types differ** (`kernel/irq/manage.c:1627`), so it works only if both descriptors agree |
+| **C. ACPI SSDT override** | Rewrite both PD controllers' `_CRS` `GpioInt` to `Shared` — what the sibling overlay does | Fixes the underlying firmware defect; needs an MS-R1 profile plus the `acpi-table-upgrade` initramfs machinery |
+
+**Evidence that reframes this.** The sibling's fix is **`o6`-scoped only**:
+`files/acpi-table-upgrade/o6/shared/ssdt/orion-o6-rts5453-shared-irq.asl` rewrites
+`\_SB.I2C1.PD10/PD11` to `GpioInt(Level, ActiveLow, Shared, …)`; `o6n/shared/ssdt/` has no
+equivalent, and `o6n/1.2/dsdt/DSDT.asl` declares only `\_SB.I2C5.PD10` (no `PD11`). So it
+provides **no** shared-IRQ fix for O6N/MS-R1, and its kernel side has no ARA at all — just
+per-client `IRQF_SHARED|IRQF_ONESHOT`.
+
+**Recommended sequence — one `acpidump` decides it:**
+1. Dump MS-R1's `_CRS` for both PD controllers and **compare trigger types**:
+   - same trigger ⇒ **option B** suffices and `0078` is unnecessary;
+   - different triggers ⇒ B cannot work; choose A or C.
+2. Confirm MS-R1 actually has **two** PD controllers. The sibling's O6N DSDT has only `PD10`;
+   if MS-R1 is likewise single-controller the problem is moot and `0078` is a no-op.
+3. If a firmware override is acceptable, prefer **C** (it fixes the real defect) and keep
+   `0078` as the fallback. Otherwise keep **A**.
+4. Whatever the dispatch outcome, **preserve `0078`'s design-independent work**: the partner
+   `ERR_PTR` guard (`0076`), capture/apply split, error preservation with offline latching,
+   the role cache updated only after a successful `usb_role_switch_set_role()`, per-group
+   IRQ/wake depth, and the probe unwind. Only the ARA *dispatch mechanism* is contentious.
+
+**Boot test (either way):** keep `CONFIG_TYPEC_RTS5453=y`, do not blacklist. Watch for the ARA
+client banner and `register partner` on both ports, and for the absence of `irq N: nobody
+cared` and of a storm. If A ships, the storm mitigation above is **mandatory**.
 
 ## Phase A — prepare (host-independent)
 
@@ -126,11 +216,12 @@ it should be excluded on policy grounds regardless.)
 
 | Overlay patch | 7.2.9 failure | Fix |
 |---|---|---|
-| `0003` SCMI | **12/44 hunks fail** (macro pair `__of_match`/`__acpi_match`, `of_node_get/put` sites upstream deleted) | **Replace with ncz `0075`** (+ `0085`), which applies 0-failure. Do **not** hand-resolve: the obvious resolution loses a fwnode ref per child device (`device_set_node(&scmi_dev->dev, np)` vs `fwnode_handle_get(np)`). |
+| `0003` SCMI | **12/44 hunks fail** (macro pair `__of_match`/`__acpi_match`, `of_node_get/put` sites upstream deleted) | **Replace with ncz `0075`** (+ `0085`), which applies 0-failure, **or** with `srcshelton 7.2.x/0003` — a full 7.2-native rewrite (738 L, 8 files) converting `device_node`→`fwnode_handle` throughout and extending `DEFINE_SCMI_TRANSPORT_DRIVER()` with an `__acpi_match` slot. Take whichever reconciles best with our local stack. Do **not** hand-resolve our `0003`: the obvious resolution loses a fwnode ref per child device (`device_set_node(&scmi_dev->dev, np)` vs `fwnode_handle_get(np)`). |
 | `0011` panthor | fails (`panthor_device.c`, `panthor_gem.c`) | vendor `00111`/`00113`/`00116` apply clean; `00112`/`00114` **do not** (coherency init moved to `panthor_gpu.c`, `should_map_wc()` re-signed) |
 | `0038` panthor suspend/resume | fails (depends on `0011`) | do not drop without a rebased `00112` |
 | `0070` SMMU IRQ | **hunk 6/6 fails**; v7.2.6+ replaced `if (ret) goto err_disable;` with `{ arm_smmu_device_disable(smmu); return ret; }` | rebase the context only |
 | `0008`, `0041` pmdomain | fail | **Reuse ncz `0077` + `0078` verbatim** — content-identical to the overlay's patches plus the `if (np)` guards for v7.2's `of_genpd_add_child_ids()` |
+| USB `cdns3` role init | **not a hunk failure but a silent API break**: v7.2's `cdns_init()` no longer calls `cdns_core_init_role()`; `cdns3-plat.c` sets `host_init` and calls it in the platform probe instead. Our vendor `cdnsp_plat_probe()` sets only `gadget_init` and relies on `cdns_init()`, so every CIXH2031 would bind `USB_ROLE_NONE` with no xHCI child — **USB dead on that port** | Either port ncz `0112` (adapt `host_init` into our `cdnsp_plat.c`, adding `EXPORT_SYMBOL_GPL(cdns_host_init)` if `USB_CDNSP` is modular), **or** adopt the sibling's architecture (`7.2.x/0025`): bind through mainline's already-correct `cdns3-plat.c` path with an ACPI match and keep the Sky1 specifics in a separate wrapper. The sibling's route needs no export and is more resilient to this class of churn |
 
 - **linlondp needs an authored fix-up, not a rebase.** Mainline 7.2 renamed
   `struct drm_atomic_state` → `struct drm_atomic_commit` treewide (**no alias**; v7.2.9
@@ -142,10 +233,19 @@ it should be excluded on policy grounds regardless.)
   `devm_kzalloc` + `drm_panel_init` pair, and `-I $(src)` in the linlon-dp Makefile.
   Roughly 80% of ncz `0081` is already covered by the overlay's version-guarded
   `1003`/`1005`/`1007`/`1008` layers — **do not re-apply `0081` wholesale**.
-- **Adopt ncz `0228` and drop `00101`'s core-DRM hunks.** `00101` patches core DRM plus four
-  other drivers to widen plane masks `u32`→`u64` (cap 64); v7.2 still enforces 32 in
-  `drm_plane.c` and still returns `u32` from `drm_plane_mask()`. Carrying a vendor patch
-  that rewrites DRM core is a large upstream-drift liability for no benefit.
+- **The `>32 planes` work needs `srcshelton 70150` — the current `00101`/`1009` pair does not
+  actually enable it.** `00101` (5173 L, 37 files) widens `u32`→`u64` only in *consumers*
+  (`drm_atomic_helper.c`, `drm_plane.c`, `drm_framebuffer.c`, `drm_mode_config.c`, amdgpu
+  trace, malidp, komeda, imx ipuv3) and **never** changes `struct drm_crtc_state.plane_mask`
+  or `drm_plane_mask()` — no patch in `files/7.1` touches `include/drm/drm_crtc.h` or
+  `drm_plane.h`. Worse, `1009` **reverts** `00101`'s `%llx` print back to `%x`. Net effect: a
+  `u32` field and macro with `u64` locals and a `%x` print, so the goal is not achieved while
+  carrying a large rewrite of DRM core. `srcshelton 7.2.x/70150` (43 L, 3 files) supplies the
+  real change: `u64 plane_mask` in `drm_crtc.h`, `u64 drm_plane_mask()` /
+  `1ULL << drm_plane_index()` in `drm_plane.h`, `%llx` in `drm_atomic.c`.
+  **Adopting `70150` requires first stripping the `drm_atomic.c` hunk from `00101` and the
+  revert hunk from `1009`** (exactly as the sibling's `cix_apply_patch()` does), or the two
+  conflict. Consider dropping `00101`'s core/peripheral hunks entirely, as the sibling does.
 
 **A4. Create `cix-sources-7.2.9.ebuild` from 7.1.5.** **[corrected]**
 - `K_GENPATCHES_VER="10"` (upstream gentoo-sources-7.2.9 uses 10; `genpatches-7.2-10.base`
@@ -173,11 +273,12 @@ anywhere in the overlay**. Add explicit bounds/revalidation, or Portage will att
 
 **A6. Regenerate the Manifest** (`ebuild ... manifest`) and run `pkgcheck scan`.
 
-**A7. Decide the `gpu_clk_stacks` gap.** Neither the overlay nor the ncz corpus handles the
-Sky1 shader-stack clock: `0087` fixes only `gpu_clk_core` and leaves
-`devm_clk_get_optional(dev, "stacks")` untouched, while the DSDT registers
-`gpu_clk_stacks` (vendor `00112` sets both). Reported symptom is `SHADER_PWRON` wedging in
-`SHADER_PWRTRANS`. This is a gap in *both* corpora and needs an authored fix.
+**A7. `gpu_clk_stacks` — take the sibling's fix.** The overlay handles only `gpu_clk_core`
+(`0087`) and leaves `devm_clk_get_optional(dev, "stacks")` untouched, while the DSDT registers
+the name `gpu_clk_stacks`. Neither the overlay nor the ncz corpus fixes this — but
+`srcshelton 7.2.x/0011` does (a `stacks` → `gpu_clk_stacks` fallback), and it is the **only**
+implementation that does. Reported symptom is `SHADER_PWRON` wedging in `SHADER_PWRTRANS`.
+Reuse their `panthor_clk_init()` handling rather than authoring a new fix.
 
 **A8. Audit the known live defects found during review.**
 - `0011` deletes all three `gpu_info.selected_coherency` references and adds none, leaving
