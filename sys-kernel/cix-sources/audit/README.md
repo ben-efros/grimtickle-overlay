@@ -24,3 +24,16 @@ that are not part of the repository.
   and `cdns-gpio 7` (the Cadence GPIO) provides the IRQ line for the RTS5453
   Type-C PD controller. Adding the dependency would disable the working GPIO
   and break Type-C PD. It is an Orion-O6-vs-MS-R1 board difference, not a gap.
+
+## Known remaining issues (evaluated, deliberately left unpatched)
+
+- **USB 0025 `cdnsp_sky1_hw_init()` (audit #6):** runs in probe (cold boot) and
+  resume — both correct. The "resets an already-active controller" concern is a
+  firmware-handoff / warm-reboot edge case; the audit's "vendor 0086" citation
+  actually refers to the (unrelated) SuperSpeedPlus patch. Low risk.
+- **USB 0025 `platform_data` (audit #8):** latent UAF — cdns3-plat.c stores
+  `cdns->pdata = dev_get_platdata()` (a pointer into the wrapper's devm `data`)
+  and dereferences it at runtime; `cdnsp_sky1_clear_acpi_pdata()` nulls the
+  device field but not the child's stored copy. Triggers only on wrapper unload
+  while the child stays bound. Fix direction: copy the needed fields in
+  cdns3-plat.c instead of holding the pointer, or unbind the child on removal.
