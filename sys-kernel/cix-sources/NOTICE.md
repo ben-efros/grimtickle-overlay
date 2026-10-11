@@ -19,6 +19,10 @@ Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
 | `0041-pmdomain-fix-dev_pm_domain_attach_by_name-for-sky1-m.patch` | `…/patches-7.2/0078-pmdomain-fix-dev_pm_domain_attach_by_name-for-sky1-m.patch` |
 | `0092-drm-panthor-sky1-power-on-via-raw-smc-scmi.patch` | `…/patches-7.2/0186-drm-panthor-sky1-power-on-GPU-via-raw-SMC-SCMI-before-first-MMIO.patch` |
 | `0093-regulator-cix-fix-stale-prot-limit-found.patch` | `…/patches-7.2/0181-regulator-cix-handle-unsupported-pmic-constraints-quietly.patch` |
+| `0098-iommu-smmu-v3-sky1-pcie-bypass-ste.patch` | `…/patches-7.2/0100-iommu-smmu-v3-sky1-pcie-bypass-ste-ats-override.patch` |
+| `0099-net-r8169-skip-hw-tally-rtl8127-sky1.patch` | `…/patches-7.2/0110-net-r8169-skip-hw-tally-rtl8127-sky1.patch` |
+| `0100-pci-cix-force-clock-pm-off-sky1-endpoints.patch` | `…/patches-7.2/0109-pci-cix-force-clock-pm-off-sky1-endpoints.patch` |
+| `0101-clocksource-sky1-defer-on-missing-timer-clocks.patch` | `…/patches-7.2/0166-clocksource-sky1-defer-on-missing-timer-clocks.patch` |
 
 ## srcshelton / gentoo-ebuilds
 
