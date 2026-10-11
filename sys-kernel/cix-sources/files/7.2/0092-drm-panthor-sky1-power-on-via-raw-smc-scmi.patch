@@ -31,7 +31,7 @@ index dd15d52..ae8da89 100644
  obj-$(CONFIG_DRM_PANTHOR) += panthor.o
  
 diff --git a/drivers/gpu/drm/panthor/panthor_device.c b/drivers/gpu/drm/panthor/panthor_device.c
-index d116560..430514e 100644
+index d116560..6908f3c 100644
 --- a/drivers/gpu/drm/panthor/panthor_device.c
 +++ b/drivers/gpu/drm/panthor/panthor_device.c
 @@ -29,6 +29,7 @@
@@ -42,7 +42,7 @@ index d116560..430514e 100644
  
  bool panthor_is_cix_sky1(struct panthor_device *ptdev)
  {
-@@ -364,6 +365,22 @@ int panthor_device_init(struct panthor_device *ptdev)
+@@ -364,6 +365,21 @@ int panthor_device_init(struct panthor_device *ptdev)
  	if (ret)
  		return ret;
  
@@ -58,7 +58,6 @@ index d116560..430514e 100644
 +	ret = sky1_gpu_power_on(ptdev);
 +	if (ret) {
 +		drm_err(&ptdev->base, "Sky1 GPU SMC power-on failed, ret=%d", ret);
-+		panthor_pm_domain_fini(ptdev);
 +		return ret;
 +	}
 +
