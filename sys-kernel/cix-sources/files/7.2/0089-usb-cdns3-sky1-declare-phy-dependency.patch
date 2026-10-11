@@ -16,7 +16,7 @@ diff --git a/drivers/usb/cdns3/Kconfig b/drivers/usb/cdns3/Kconfig
  	tristate "Cadence USBSSP support on CIX Sky1 SoCs"
  	depends on (ARCH_CIX || COMPILE_TEST) && (ACPI || OF)
  	depends on COMMON_CLK && RESET_CONTROLLER && MFD_SYSCON
-+	select PHY_CIX_USBDP if ARCH_CIX
++	select PHY_CIX_USBDP if ARCH_CIX && TYPEC
  	default USB_CDNS3
  	help
  	  Say Y or M here to enable the platform integration for Cadence

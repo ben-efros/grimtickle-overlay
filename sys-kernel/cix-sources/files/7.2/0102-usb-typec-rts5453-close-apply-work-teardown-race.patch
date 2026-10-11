@@ -1,0 +1,57 @@
+From: grimtickle-overlay (local)
+Subject: [PATCH] usb: typec: rts5453: close apply_work teardown race
+
+Audit finding #4: the guard handler (rts5453_group_service_members) can
+schedule rts->apply_work after rts5453h_remove() cancels it, because the
+removing flag was set and the work cancelled outside members_lock while the
+handler holds that lock across its removing check and schedule. The probe
+error path also never cancelled apply_work at all.
+
+Fix:
+- Set rts->removing under members_lock in rts5453h_remove(), so a handler
+  that already holds the lock either runs before the flag is set (and its
+  scheduled work is then cancelled) or sees the flag and skips the member.
+- Cancel apply_work (and set removing) on the err_group_leave path so a work
+  queued during probe cannot outlive the devm-managed rts.
+---
+diff --git a/drivers/usb/typec/rts5453.c b/drivers/usb/typec/rts5453.c
+index 6397eaf..6af16b9 100644
+--- a/drivers/usb/typec/rts5453.c
++++ b/drivers/usb/typec/rts5453.c
+@@ -1588,6 +1588,13 @@ static int rts5453h_probe(struct i2c_client *client)
+ 	return 0;
+ 
+ err_group_leave:
++	/*
++	 * apply_work may already be queued (the ARA/guard paths can fire
++	 * during probe); cancel it before the devm-managed rts is torn down
++	 * so it cannot run on freed memory.
++	 */
++	WRITE_ONCE(rts->removing, true);
++	cancel_delayed_work_sync(&rts->apply_work);
+ 	rts5453_group_leave(rts);
+ err_unregister_ports:
+ 	/*
+@@ -1603,8 +1610,22 @@ static int rts5453h_probe(struct i2c_client *client)
+ static void rts5453h_remove(struct i2c_client *client)
+ {
+ 	struct rts5453h *rts = i2c_get_clientdata(client);
++	struct rts5453_irq_group *group = rts->irq_group;
+ 
++	/*
++	 * Set the removing flag under members_lock so a concurrently-running
++	 * guard handler (which holds members_lock across its removing check
++	 * and apply_work schedule) cannot pass the check and re-queue
++	 * apply_work after the cancel below. Otherwise the handler could
++	 * schedule apply_work between the flag write and the cancel, and it
++	 * would then run on freed memory after remove() returns.
++	 */
++	if (group)
++		mutex_lock(&group->members_lock);
+ 	WRITE_ONCE(rts->removing, true);
++	if (group)
++		mutex_unlock(&group->members_lock);
++
+ 	cancel_delayed_work_sync(&rts->apply_work);
+ 
+ 	device_remove_file(&client->dev, &dev_attr_disable_pd_interrupt);
