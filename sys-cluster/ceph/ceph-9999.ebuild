@@ -42,6 +42,21 @@ EGIT_SUBMODULES=(
 	src/xxHash
 	src/erasure-code/jerasure/jerasure
 	src/erasure-code/jerasure/gf-complete
+	# WITH_MGR (default on) unconditionally ExternalProject_Add()s the bundled
+	# rook manager client from this submodule (src/pybind/mgr/rook/CMakeLists.txt:3),
+	# so it must be present even though it is a Python-only helper.
+	src/pybind/mgr/rook/rook-client-python
+	# Default USE=radosgw makes src/CMakeLists.txt:1203-1205 add_subdirectory
+	# crypto, libkmip and rgw unconditionally; each needs its bundled submodule
+	# (crypto builds isa-l_crypto via ExternalProject; rgw includes
+	# src/s3select/rapidjson headers).
+	src/crypto/isa-l/isa-l_crypto
+	src/libkmip
+	# NB: git-r3 matches the submodule *name*, and this one's name is
+	# "s3select" while its path is src/s3select (main .gitmodules:53-55).
+	# Listing the path silently logs "Skipping submodule s3select", leaving
+	# src/s3select/rapidjson/include missing at generate time.
+	s3select
 )
 
 PROPERTIES="live"
@@ -75,9 +90,11 @@ REQUIRED_USE="
 # tests need root access, and network access
 RESTRICT="test !test? ( test )"
 
-# Note: Patch fromn Fedora, ceph-20.2.0-libarrow-20.0.0.patch.xz, is not compatible with recent changes
-# in dev-libs/apache-arrow-24.0.0, in particular, https://github.com/apache/arrow/pull/49492 . Limit
-# to below that version until Fedora respins the patch.
+# NOTE (ceph-9999): main requires RocksDB >= 9.10
+# (find_package(RocksDB 9.10 REQUIRED), CMakeLists.txt:822), hence the
+# >=dev-libs/rocksdb-9.10 atom below instead of the 20.2.4 pin. The Fedora
+# libarrow patch used by 20.2.4 is not applied here: it does not apply to main
+# and its SRC_URI entry is gone (see PATCHES).
 DEPEND="
 	${LUA_DEPS}
 	${PYTHON_DEPS}
@@ -100,7 +117,7 @@ DEPEND="
 	dev-libs/libutf8proc:=
 	dev-libs/nss:=
 	dev-libs/openssl:=
-	<dev-libs/rocksdb-7.9.3:=
+	>=dev-libs/rocksdb-9.10:=
 	dev-libs/thrift:=
 	dev-libs/xmlsec:=[openssl]
 	dev-cpp/yaml-cpp:=
@@ -236,8 +253,14 @@ PATCHES=(
 	"${FILESDIR}/ceph-17.2.5-suppress-cmake-warning.patch"
 	# https://bugs.gentoo.org/907739
 	"${FILESDIR}/ceph-18.2.0-cython3.patch"
+	# NOTE: ceph-18.2.4-liburing.patch is deliberately NOT applied for the live
+	# tree. It swaps Finduring.cmake's find_package_handle_standard_args for
+	# pkg_check_modules (which sets URING_FOUND, not uring_FOUND) but leaves the
+	# lowercase test, so uring::uring is never created; main's
+	# src/rgw/CMakeLists.txt:539 still links uring::uring, so generate fails
+	# with "Target rgw_common links to uring::uring but the target was not
+	# found". Unpatched, main's Finduring creates the imported target.
 	# https://bugs.gentoo.org/936889
-	"${FILESDIR}/ceph-18.2.4-liburing.patch"
 	"${FILESDIR}/ceph-18.2.4-spdk.patch"
 	"${FILESDIR}/ceph-19.2.2-add-option-to-build-agains-system-opentelemetry.patch"
 	"${FILESDIR}/ceph-19.2.2-common-add-dependency-on-legacy-option-headers.patch"
@@ -287,6 +310,15 @@ src_unpack() {
 	use spdk && EGIT_SUBMODULES+=( src/spdk )
 	use test && EGIT_SUBMODULES+=( src/googletest )
 	git-r3_src_unpack
+
+	# git-r3 does not recurse into a submodule's own submodules. The s3select
+	# submodule vendors rapidjson and a csv parser that way, and main's
+	# src/CMakeLists.txt:426 unconditionally points RapidJSON::RapidJSON at
+	# src/s3select/rapidjson/include, so without this the build dies at
+	# generate time with "Imported target RapidJSON::RapidJSON includes
+	# non-existent path". The clone above already proves network is available
+	# in src_unpack for this live ebuild.
+	git -C "${S}/src/s3select" submodule update --init --recursive || die
 }
 
 src_prepare() {
@@ -339,6 +371,31 @@ ceph_src_configure() {
 		# UADK during configure, which cannot work with the git lookup
 		# disabled above (and network-sandbox). Disable it explicitly.
 		-DWITH_UADK:BOOL=OFF
+		# QAT defaults ON on x86_64 only (CMAKE_DEPENDENT_OPTION), and its
+		# configure does an ExternalProject_Add on the bundled src/qatlib /
+		# src/qatzip submodules. The live ebuild does not fetch those, so on
+		# amd64 configure dies with "No download info given for 'qatlib_ext'".
+		# QATZIP additionally FATAL_ERRORs unless QAT is enabled, so turn both
+		# off. QAT is an optional accelerator; aarch64 is unaffected (both
+		# already default OFF there).
+		-DWITH_QATLIB:BOOL=OFF
+		-DWITH_QATZIP:BOOL=OFF
+		# main added WITH_CATCH2 (default ON), which uses CPM to git-clone
+		# Catch2@3.8.1 at configure time. Portage's network sandbox, plus this
+		# ebuild's -DCMAKE_DISABLE_FIND_PACKAGE_Git=ON, makes that fail with
+		# "could not find git for clone of catch2-populate". Catch2 is only for
+		# unit tests, so tie it to USE=test.
+		-DWITH_CATCH2:BOOL=$(usex test)
+		# WITH_BREAKPAD defaults ON and ExternalProject_Add()s the bundled
+		# src/breakpad + src/lss submodules, which the live ebuild does not
+		# fetch. Disable it (crash minidumps only).
+		-DWITH_BREAKPAD:BOOL=OFF
+		# main defaults WITH_RADOSGW_LANCEDB ON on x86_64 AND aarch64, and its
+		# src/rgw/CMakeLists.txt unconditionally includes
+		# src/rgw/lancedb-c/cmake/ProbeRustNativeLibs.cmake. The live ebuild
+		# does not fetch the lancedb-c submodule (it needs cargo + network),
+		# so disable the feature.
+		-DWITH_RADOSGW_LANCEDB:BOOL=OFF
 		-DWITH_BABELTRACE:BOOL=$(usex babeltrace)
 		-DWITH_BLUESTORE_PMEM:BOOL=$(usex pmdk)
 		-DWITH_CEPHFS:BOOL=$(usex cephfs)
