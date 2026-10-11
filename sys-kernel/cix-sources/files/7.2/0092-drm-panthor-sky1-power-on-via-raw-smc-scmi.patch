@@ -66,7 +66,7 @@ index d116560..6908f3c 100644
  		return ret;
 diff --git a/drivers/gpu/drm/panthor/panthor_sky1.c b/drivers/gpu/drm/panthor/panthor_sky1.c
 new file mode 100644
-index 0000000..b04f99d
+index 0000000..e24e33d
 --- /dev/null
 +++ b/drivers/gpu/drm/panthor/panthor_sky1.c
 @@ -0,0 +1,127 @@
@@ -88,7 +88,7 @@ index 0000000..b04f99d
 + * (SMC power-on, register magic values) does not interleave with the upstream
 + * panthor_device.c logic, easing rebases onto newer kernels.
 + *
-+ * panthor_is_sky1() itself lives in panthor_device.c (NCZ 0084).
++ * panthor_is_cix_sky1() itself lives in panthor_device.c (NCZ 0084).
 + */
 +
 +#if IS_ENABLED(CONFIG_ACPI)
@@ -190,7 +190,7 @@ index 0000000..b04f99d
 +
 +int sky1_gpu_power_on(struct panthor_device *ptdev)
 +{
-+	if (!panthor_is_sky1(ptdev))
++	if (!panthor_is_cix_sky1(ptdev))
 +		return 0;
 +
 +	return sky1_smc_scmi_power_set(ptdev->base.dev, SKY1_PD_GPU, 0);
