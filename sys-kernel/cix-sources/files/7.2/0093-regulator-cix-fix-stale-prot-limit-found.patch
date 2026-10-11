@@ -1,0 +1,39 @@
+From: Jason Perlow <jperlow@gmail.com> (ncz-os/meta-cix)
+Subject: [PATCH] regulator: cix: handle unsupported pmic constraints quietly
+Source: ncz-os/meta-cix
+        linux-cix-sky1-ncz-7.2/patches-7.2/0181-regulator-cix-handle-unsupported-pmic-constraints-quietly.patch
+Adopted: grimtickle-overlay 7.2.9; see NOTICE.md.
+
+fwnode_get_regulator_prot_limits() left `found` uninitialised and only ever
+assigned it true, never resetting it to false between property probes. A
+present "warn" limit followed by an absent "error" limit therefore left the
+stale `found` set and incorrectly asserted set[i]. Assign it from the read
+result directly.
+---
+diff --git a/drivers/regulator/fwnode_regulator.c b/drivers/regulator/fwnode_regulator.c
+index da809a0..d3ae3b1 100644
+--- a/drivers/regulator/fwnode_regulator.c
++++ b/drivers/regulator/fwnode_regulator.c
+@@ -35,7 +35,7 @@ static void fwnode_get_regulator_prot_limits(struct fwnode_handle *np,
+ 				struct regulation_constraints *constraints)
+ {
+ 	u32 pval;
+-	int i, ret;
++	int i;
+ 	static const char *const props[] = {
+ 		"regulator-oc-%s-microamp",
+ 		"regulator-ov-%s-microvolt",
+@@ -64,11 +64,9 @@ static void fwnode_get_regulator_prot_limits(struct fwnode_handle *np,
+ 
+ 		for (j = 0; j < ARRAY_SIZE(lvl); j++) {
+ 			snprintf(prop, 255, props[i], lvl[j]);
+-			ret = fwnode_property_read_u32(np, prop, &pval);
+-			if (!ret) {
++			found = !fwnode_property_read_u32(np, prop, &pval);
++			if (found)
+ 				fill_limit(l[j], pval);
+-				found = true;
+-			}
+ 			set[i] |= found;
+ 		}
+ 	}
