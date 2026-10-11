@@ -29,6 +29,10 @@ A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebui
 | `0011-drm-panthor-add-sky1-acpi-support.patch` | `sys-kernel/cix-sources/files/7.2.x/0011-drm-panthor-add-sky1-acpi-support.patch` |
 | `0025-usb-cdns3-add-audited-sky1-platform-support.patch` | `sys-kernel/cix-sources/files/7.2.x/0025-usb-cdns3-add-audited-sky1-platform-support.patch` |
 | `0089-usb-cdns3-sky1-declare-phy-dependency.patch` | `sys-kernel/cix-sources/files/7.2.x/60010-usb-cdns3-sky1-declare-phy-dependency.patch` |
+| `0094-topology-has-missing-cpufreq-ref.patch` | `files/20050-topology-has-missing-cpufreq-ref.patch` |
+| `0095-platform-acpi-resolve-named-irq-resources.patch` | `files/7.2.x/40042-platform-acpi-resolve-named-irq-resources.patch` |
+| `0096-scmi-hwmon-no-of-thermal-zones-on-acpi.patch` | `files/30090-scmi-hwmon-do-not-use-of-thermal-zones-on-acpi.patch` |
+| `0097-scmi-perf-rational-frequency-conversion.patch` | `files/30195-firmware-arm-scmi-use-rational-perf-frequency-conversion.patch` |
 
 The panthor patch's upstream file carries **no in-file author, `Source:`, or
 `Signed-off-by`**; the overlay it came from pins the vendor base
