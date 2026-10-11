@@ -1,0 +1,26 @@
+From: grimtickle-overlay (local)
+Subject: [PATCH] ASoC: cix: fix uninitialised 'status' in dailink status check
+
+cix_dailink_status_check() declared `const char *status;` uninitialised and
+then dereferenced it whenever of_property_read_string() failed to set it
+(the "status" property is absent), which is undefined behaviour. Initialise
+it to NULL so an absent property is well-defined and treated as "okay".
+The `ret` variable was assigned but never used; drop it.
+---
+diff --git a/sound/soc/cix/card-utils.c b/sound/soc/cix/card-utils.c
+index 15080dd..49958ff 100644
+--- a/sound/soc/cix/card-utils.c
++++ b/sound/soc/cix/card-utils.c
+@@ -108,10 +108,9 @@ static int cix_dailink_parsing_fmt(struct device_node *np,
+ /* only disabled dai-link status, not continue to parse */
+ static bool cix_dailink_status_check(struct device_node *np)
+ {
+-	const char *status;
+-	int ret;
++	const char *status = NULL;
+ 
+-	ret = of_property_read_string(np, "status", &status);
++	of_property_read_string(np, "status", &status);
+ 
+ 	if (status) {
+ 		if (!strcmp(status, "okay") || !strcmp(status, "ok"))
