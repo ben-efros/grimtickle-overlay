@@ -1,0 +1,143 @@
+From: grimtickle-overlay (local; adapted from ncz-os/meta-cix 0168)
+Subject: [PATCH] clk: cix: sky1: re-map CLKT bridge when SCMI clocks device binds
+
+The ACPI CLKT->clkdev bridge walks the namespace once at probe and maps
+the SCMI clocks resolvable at that moment. On Sky1 there are multiple SCMI
+clock provider instances binding at different times; when the "clocks"
+device (protocol 0x14) that owns the USB/i2c/timer/PHY clocks binds AFTER
+this bridge probes, those clocks are never aliased and their consumers
+spin in -EPROBE_DEFER forever.
+
+Register a notifier on scmi_bus_type: on BUS_NOTIFY_BOUND_DRIVER for the
+clocks device, re-run the CLKT walk (serialized by priv->lock) so the
+newly-available clocks get their clkdev entries. The probe still defers
+only when nothing at all was mapped, so this cannot cause the
+teardown/re-walk storm that gating on partial maps did.
+
+scmi_bus_type is EXPORT_SYMBOL_GPL() but declared only in the private
+drivers/firmware/arm_scmi/common.h, so declare it locally.
+
+Adapted from ncz-os 0168 onto our simpler driver (which has no mapped_list
+dedup): a re-walk re-creates clkdev entries for already-mapped clocks,
+which is bounded, harmless for clk_get() (same clk), and freed by the
+per-entry devm actions on removal.
+---
+diff --git a/drivers/clk/cix/clk-sky1-acpi.c b/drivers/clk/cix/clk-sky1-acpi.c
+index 4c5ca95..abd8a4b 100644
+--- a/drivers/clk/cix/clk-sky1-acpi.c
++++ b/drivers/clk/cix/clk-sky1-acpi.c
+@@ -20,11 +20,23 @@
+ #include <linux/acpi.h>
+ #include <linux/clk.h>
+ #include <linux/clkdev.h>
++#include <linux/mutex.h>
+ #include <linux/module.h>
++#include <linux/notifier.h>
+ #include <linux/platform_device.h>
++#include <linux/scmi_protocol.h>
++
++/*
++ * scmi_bus_type is EXPORT_SYMBOL_GPL() but declared only in the private
++ * drivers/firmware/arm_scmi/common.h, so it must be declared here to
++ * register the notifier.
++ */
++extern const struct bus_type scmi_bus_type;
+ 
+ struct sky1_acpi_clk {
+ 	struct device *dev;
++	struct notifier_block scmi_nb;
++	struct mutex lock;
+ 	int mapped;
+ };
+ 
+@@ -150,22 +162,84 @@ static acpi_status sky1_clkt_walk_cb(acpi_handle handle, u32 level,
+ 	return AE_OK;
+ }
+ 
++static int sky1_clkt_walk(struct sky1_acpi_clk *priv)
++{
++	acpi_status status;
++
++	status = acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT,
++				     ACPI_UINT32_MAX, sky1_clkt_walk_cb,
++				     NULL, priv, NULL);
++	if (ACPI_FAILURE(status))
++		return -ENODEV;
++
++	return 0;
++}
++
++static int sky1_scmi_bus_notify(struct notifier_block *nb,
++				unsigned long action, void *data)
++{
++	struct sky1_acpi_clk *priv =
++		container_of(nb, struct sky1_acpi_clk, scmi_nb);
++	struct scmi_device *sdev;
++	struct device *dev = data;
++	int old_mapped;
++	int ret;
++
++	if (action != BUS_NOTIFY_BOUND_DRIVER || !dev)
++		return NOTIFY_DONE;
++
++	sdev = to_scmi_dev(dev);
++	if (sdev->protocol_id != SCMI_PROTOCOL_CLOCK ||
++	    strcmp(sdev->name, "clocks"))
++		return NOTIFY_DONE;
++
++	mutex_lock(&priv->lock);
++	old_mapped = priv->mapped;
++	ret = sky1_clkt_walk(priv);
++	if (ret)
++		dev_warn(priv->dev, "ACPI CLKT remap failed: %d\n", ret);
++	else if (priv->mapped != old_mapped)
++		dev_info(priv->dev, "Mapped %d additional ACPI clock entries\n",
++			 priv->mapped - old_mapped);
++	mutex_unlock(&priv->lock);
++
++	return NOTIFY_OK;
++}
++
++static void sky1_scmi_bus_notifier_unregister(void *data)
++{
++	bus_unregister_notifier(&scmi_bus_type, data);
++}
++
+ static int sky1_acpi_clk_probe(struct platform_device *pdev)
+ {
+ 	struct sky1_acpi_clk *priv;
+-	acpi_status status;
++	int ret;
+ 
+ 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+ 		return -ENOMEM;
+ 
+ 	priv->dev = &pdev->dev;
++	mutex_init(&priv->lock);
++	priv->scmi_nb.notifier_call = sky1_scmi_bus_notify;
+ 
+-	status = acpi_walk_namespace(ACPI_TYPE_DEVICE, ACPI_ROOT_OBJECT,
+-				     ACPI_UINT32_MAX, sky1_clkt_walk_cb,
+-				     NULL, priv, NULL);
+-	if (ACPI_FAILURE(status))
+-		return dev_err_probe(&pdev->dev, -ENODEV,
++	ret = bus_register_notifier(&scmi_bus_type, &priv->scmi_nb);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret,
++				     "Failed to register SCMI bus notifier\n");
++
++	ret = devm_add_action_or_reset(&pdev->dev,
++				       sky1_scmi_bus_notifier_unregister,
++				       &priv->scmi_nb);
++	if (ret)
++		return ret;
++
++	mutex_lock(&priv->lock);
++	ret = sky1_clkt_walk(priv);
++	mutex_unlock(&priv->lock);
++	if (ret)
++		return dev_err_probe(&pdev->dev, ret,
+ 				     "ACPI namespace walk failed\n");
+ 
+ 	if (priv->mapped == 0)

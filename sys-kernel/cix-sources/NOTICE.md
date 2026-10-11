@@ -23,6 +23,7 @@ Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
 | `0099-net-r8169-skip-hw-tally-rtl8127-sky1.patch` | `…/patches-7.2/0110-net-r8169-skip-hw-tally-rtl8127-sky1.patch` |
 | `0100-pci-cix-force-clock-pm-off-sky1-endpoints.patch` | `…/patches-7.2/0109-pci-cix-force-clock-pm-off-sky1-endpoints.patch` |
 | `0101-clocksource-sky1-defer-on-missing-timer-clocks.patch` | `…/patches-7.2/0166-clocksource-sky1-defer-on-missing-timer-clocks.patch` |
+| `0104-clk-cix-remap-clkt-bridge-on-scmi-clocks-bind.patch` | adapted from `…/patches-7.2/0168-clk-cix-sky1-remap-clkt-bridge-on-scmi-clocks-bind.patch` (simplified: no mapped_list dedup) |
 
 ## srcshelton / gentoo-ebuilds
 
