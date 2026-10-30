@@ -1,0 +1,162 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 16:20:00 +0800
+Subject: soc: cix: acpi-resource-lookup: narrow readiness-deferral scope and fix publication ordering
+
+Hardens the ACPI resource-lookup readiness mechanism added in a
+previous patch:
+
+ * cix_acpi_resource_lookup_defer() previously converted *any*
+   non-EPROBE_DEFER error into -EPROBE_DEFER while injection was
+   pending, which is too broad: -EINVAL (malformed property),
+   -ENOMEM, or -EIO from a reset/clock provider are real failures
+   unrelated to injection ordering and should not be masked as a
+   deferral. Checking drivers/reset/core.c's fwnode reset-lookup path
+   (__fwnode_reset_control_get(), __reset_control_get()) confirms
+   -ENOENT is what is returned specifically when a named
+   "reset-names"/"resets" (or, for clocks, "clock-names"/"clocks")
+   property is not present - i.e. exactly the "not injected yet" case
+   this mechanism targets. The helper now only defers on -ENOENT;
+   every other error is returned unchanged.
+
+ * The readiness flag was published with smp_wmb() + WRITE_ONCE() and
+   read with plain READ_ONCE(). A write barrier on the writer side
+   without a matching acquire/read barrier on the reader side is not
+   a correct publication pattern: it does not guarantee that a reader
+   which observes the flag as true also observes the _DSD injection
+   writes that preceded it. Switched to smp_store_release() on the
+   write side and smp_load_acquire() on the read side, which do
+   provide that guarantee.
+
+ * cix_acpi_resource_lookup_ready()'s "always ready" behavior when
+   CONFIG_CIX_ACPI_RESOURCE_LOOKUP is disabled was gated on
+   IS_ENABLED(). CIX_ACPI_RESOURCE_LOOKUP is a bool-only Kconfig
+   symbol today (see drivers/soc/cix/Kconfig), so there is no actual
+   built-in-referencing-a-module linkage hazard to guard against, but
+   the header now uses IS_REACHABLE() instead so it remains correct
+   without changes if that symbol is ever turned into a tristate.
+
+ * Documented that readiness is an intentionally one-shot, monotonic
+   signal: CIXA1019 has no .remove()/rebind path, so there is no
+   window today where a consumer could observe "ready" and then race
+   a second, in-progress injection pass. This is called out explicitly
+   in both the flag's definition and the public header so the
+   assumption is visible if CIXA1019 ever gains a teardown/rebind path.
+
+No consumer of cix_acpi_resource_lookup_defer() needs to change:
+its signature and the -EPROBE_DEFER-while-pending / real-error-once-
+ready contract are unchanged, only the errno scope and the internal
+memory-ordering primitives are corrected.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0072200000000000000000000000000000000074
+---
+ drivers/soc/cix/cix-acpi-resource-lookup.c       | 27 ++++++++++++++++++----
+ include/linux/soc/cix/cix-acpi-resource-lookup.h | 29 ++++++++++++++++++++++--
+ 2 files changed, 49 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/soc/cix/cix-acpi-resource-lookup.c b/drivers/soc/cix/cix-acpi-resource-lookup.c
+index 111111111111..222222222222 100644
+--- a/drivers/soc/cix/cix-acpi-resource-lookup.c
++++ b/drivers/soc/cix/cix-acpi-resource-lookup.c
+@@ -614,12 +614,27 @@ free_entry:
+  * cix_acpi_resource_lookup_ready() before treating a reset/clock/regmap
+  * lookup failure as final, since they may otherwise probe (and be bound
+  * by driver core) before this device's probe() has run.
++ *
++ * This is intentionally a one-shot, monotonic flag: CIXA1019 is a
++ * built-in platform helper for a non-removable ACPI firmware table and
++ * has no .remove()/unbind support, so there is no path that would need
++ * to clear readiness again once set. If CIXA1019 ever gains a remove
++ * path, or is expected to run its injection pass more than once (e.g.
++ * on rebind), this flag and its consumers must be revisited - a
++ * consumer that races a real re-injection window would otherwise see
++ * "ready" and stop deferring even though properties are being
++ * rewritten.
+  */
+ static bool res_lookup_ready;
+ 
+ bool cix_acpi_resource_lookup_ready(void)
+ {
+-	return READ_ONCE(res_lookup_ready);
++	/*
++	 * Pairs with smp_store_release() below: an observed "true" here
++	 * must guarantee that the _DSD injection writes performed before
++	 * that store are visible to this CPU too.
++	 */
++	return smp_load_acquire(&res_lookup_ready);
+ }
+ EXPORT_SYMBOL_GPL(cix_acpi_resource_lookup_ready);
+ 
+@@ -632,11 +647,13 @@ static int acpi_resource_lookup_probe(struct platform_device *pdev)
+ 	rst_inject_dsd_props(&pdev->dev);
+ 
+ 	/*
+-	 * Publish readiness only after injection is fully done, and only
+-	 * after the _DSD writes above are visible to other CPUs.
++	 * Publish readiness only after injection is fully done. The
++	 * release pairs with the acquire load in
++	 * cix_acpi_resource_lookup_ready() so that every _DSD injection
++	 * write above is guaranteed visible to a consumer that observes
++	 * readiness as true.
+ 	 */
+-	smp_wmb();
+-	WRITE_ONCE(res_lookup_ready, true);
++	smp_store_release(&res_lookup_ready, true);
+ 
+ 	dev_info(&pdev->dev, "ACPI resource lookup complete\n");
+ 	return 0;
+diff --git a/include/linux/soc/cix/cix-acpi-resource-lookup.h b/include/linux/soc/cix/cix-acpi-resource-lookup.h
+index 111111111111..222222222222 100644
+--- a/include/linux/soc/cix/cix-acpi-resource-lookup.h
++++ b/include/linux/soc/cix/cix-acpi-resource-lookup.h
+@@ -14,6 +14,10 @@
+  * to turn a resource lookup failure into a bounded -EPROBE_DEFER while
+  * injection is still pending, and let the real error through once
+  * injection has completed (so probe does not defer forever).
++ *
++ * cix_acpi_resource_lookup_ready() is a one-shot, monotonic signal (see
++ * the implementation in cix-acpi-resource-lookup.c): CIXA1019 has no
++ * remove()/rebind path today, so readiness never needs to be cleared.
+  */
+ #ifndef __CIX_ACPI_RESOURCE_LOOKUP_H__
+ #define __CIX_ACPI_RESOURCE_LOOKUP_H__
+@@ -22,7 +26,16 @@
+ #include <linux/device.h>
+ #include <linux/errno.h>
+ 
+-#if IS_ENABLED(CONFIG_CIX_ACPI_RESOURCE_LOOKUP)
++/*
++ * CONFIG_CIX_ACPI_RESOURCE_LOOKUP is bool-only (see
++ * drivers/soc/cix/Kconfig), so it can never be built as a module while
++ * a consumer PHY/USB driver is built-in - there is no built-in-calling
++ * a not-yet-loaded-module linkage hazard to guard against today.
++ * IS_REACHABLE() is used anyway (rather than IS_ENABLED()) so this
++ * stays correct without changes if CIX_ACPI_RESOURCE_LOOKUP is ever
++ * turned into a tristate.
++ */
++#if IS_REACHABLE(CONFIG_CIX_ACPI_RESOURCE_LOOKUP)
+ bool cix_acpi_resource_lookup_ready(void);
+ #else
+ static inline bool cix_acpi_resource_lookup_ready(void)
+@@ -33,7 +46,19 @@ static inline bool cix_acpi_resource_lookup_ready(void)
+ 
+ static inline int cix_acpi_resource_lookup_defer(struct device *dev, int err)
+ {
+-	if (err && err != -EPROBE_DEFER && ACPI_COMPANION(dev) &&
++	/*
++	 * -ENOENT is what devm_reset_control_get()/devm_clk_get() and the
++	 * underlying fwnode reset/clk lookup helpers return when a named
++	 * "reset-names"/"clock-names" entry or its "resets"/"clocks"
++	 * property is not (yet) present - i.e. exactly the case where
++	 * CIXA1019 has not injected it yet. Other errors (-EINVAL for
++	 * malformed properties, -ENOMEM, -EIO from a provider, etc.) are
++	 * real failures unrelated to injection ordering and must not be
++	 * masked as a deferral. A genuine -EPROBE_DEFER (e.g. the reset
++	 * controller's own driver not registered yet) is left untouched
++	 * by the caller already excluding it below.
++	 */
++	if (err == -ENOENT && ACPI_COMPANION(dev) &&
+ 	    !cix_acpi_resource_lookup_ready())
+ 		return -EPROBE_DEFER;
+ 

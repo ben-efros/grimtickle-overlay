@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Copilot <223556219+Copilot@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 14:00:00 +0800
+Subject: usb: cdns3: sky1: fix ACPI-broken OTG role-switch detection for runtime PM
+
+cdnsp_sky1_probe() decides whether a CDNSP controller instance is
+allowed to enter runtime PM D3 (CDNS3_DEFAULT_PM_RUNTIME_ALLOW) by
+checking whether it has a child node with a "usb-role-switch"
+property - the assumption being that only OTG/USB-C controllers,
+which get an out-of-band wake signal from the rts5453 PD controller,
+can safely tolerate D3 and still notice a hot-plug event.
+
+That check used for_each_child_of_node(node, child), where "node" is
+dev->of_node captured at the top of the function. Under ACPI boot -
+which is how every CIXH2030/CIXH2031 CDNSP instance on this platform
+is described - dev->of_node is always NULL, so this loop silently
+iterated zero times on every single call. The practical effect is
+that has_role_switch was unconditionally false under ACPI, and every
+CDNSP controller (including the actual OTG/USB-C one that legitimately
+has a role switch) fell through to pm_runtime_forbid() in
+cdnsp-plat.c, regardless of the child-node content in the firmware
+tables.
+
+Fix the detection itself by switching to the firmware-agnostic child
+node API already used correctly elsewhere in this same file:
+device_for_each_child_node()/fwnode_property_read_bool() instead of
+for_each_child_of_node()/of_property_read_bool(). This walks ACPI
+_DSD-described child nodes exactly as it would DT child nodes, so
+has_role_switch is now computed correctly under both boot paths.
+
+Separately, this stack is still under active USB storage
+stability hardening (the reset/PHY/IRQ lifecycle work covered by the
+rest of this patch series). Sustained USB-C storage I/O across a
+runtime-PM D3 suspend/resume cycle - relying on rts5453's
+out-of-band wake to bring the controller back for a hot-plug or
+already-attached-device event - has not been stress-tested on this
+platform. Simply fixing the detection bug above would, on its own,
+change behavior from "every controller forced active" (today's
+accidental but conservative ACPI behavior) to "the OTG/USB-C
+controller is allowed into D3" - introducing an unvalidated suspend
+path directly into a controller that is currently the focus of
+storage-stability work.
+
+To decouple the correctness fix from that behavior change, has_role_
+switch now gates on a new static const gate,
+cdnsp_sky1_runtime_pm_allow_otg, initialized to false, with a comment
+explaining it should be flipped to true once wake-from-D3 reliability
+via rts5453 has been validated by storage stress testing. Until then,
+the net effect of this patch is: detection is now correct under ACPI
+and a dev_info() line reports which controllers do or do not have a
+role switch, but every controller still gets pm_runtime_forbid()
+exactly as it does today, avoiding any behavioral change during the
+current validation phase while fixing the latent bug for when
+runtime PM is intentionally re-enabled.
+
+
+Follow-up per patchset_20260728b audit: cdnsp_sky1_runtime_pm_allow_otg
+was a `static const bool`, so the only way to actually validate the
+D3/wake-from-rts5453 path described above was to edit the source and
+rebuild the module - there was no way to flip it for a test boot or to
+force it back off from a running system without a rebuild. It is now
+a proper module parameter (module_param_named(runtime_pm_allow_otg,
+..., bool, 0644)) so it can be enabled for validation, or forced back
+off (e.g. via a modprobe.d option), without a kernel/module rebuild,
+while still defaulting to false (every controller stays active) until
+that validation is complete.
+
+Signed-off-by: Copilot <223556219+Copilot@users.noreply.github.com>
+Change-Id: I0080000000000000000000000000000000000080
+---
+ drivers/usb/cdns3/cdnsp-sky1.c | 60 +++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 54 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/usb/cdns3/cdnsp-sky1.c b/drivers/usb/cdns3/cdnsp-sky1.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/cdns3/cdnsp-sky1.c
++++ b/drivers/usb/cdns3/cdnsp-sky1.c
+@@ -42,6 +42,22 @@
+  */
+ static DEFINE_MUTEX(cdnsp_sky1_init_lock);
+ 
++/*
++ * Gate for allowing runtime PM D3 on OTG/USB-C CDNSP controllers that have
++ * a "usb-role-switch" child (see the has_role_switch check in
++ * cdnsp_sky1_probe()). Kept false by default until sustained USB-C storage
++ * I/O across a runtime-PM D3 suspend/resume cycle has been validated on
++ * this ACPI platform. Exposed as a module parameter rather than a
++ * compile-time constant so it can actually be flipped for validation
++ * without rebuilding the module, and so a distro/initramfs can force it
++ * back off (e.g. via a modprobe.d option) without a kernel rebuild.
++ */
++static bool cdnsp_sky1_runtime_pm_allow_otg;
++module_param_named(runtime_pm_allow_otg, cdnsp_sky1_runtime_pm_allow_otg,
++		    bool, 0644);
++MODULE_PARM_DESC(runtime_pm_allow_otg,
++		  "Allow runtime PM D3 on OTG/USB-C CDNSP controllers (default: N, keep disabled during storage validation)");
++
+ static const char *cix_usb_clk_names[CIX_USB_CLK_NUM] = {
+ 		"sof_clk", "usb_aclk", "lpm_clk", "usb_pclk"
+ };
+@@ -791,18 +807,50 @@ static int cdnsp_sky1_probe(struct platform_device *pdev)
+ 	 * rts5453 PD controller provides out-of-band wake on device plug.
+ 	 * Host-only (USB-A) controllers cannot generate PME from D3, so
+ 	 * they must stay active for reliable hot-plug detection.
++	 *
++	 * This must use the fwnode-based child-node API rather than
++	 * for_each_child_of_node(node, ...): "node" is dev->of_node, which
++	 * is NULL under ACPI boot, so the previous of_node-only loop never
++	 * iterated on this platform and has_role_switch was always false -
++	 * every CDNSP controller silently fell through to pm_runtime_forbid()
++	 * in cdnsp-plat.c regardless of whether it actually had a role
++	 * switch. device_for_each_child_node()/fwnode_property_read_bool()
++	 * walk the same child nodes correctly under both DT and ACPI.
+ 	 */
+ 	{
+-		struct device_node *child;
++		struct fwnode_handle *child;
++		bool has_role_switch = false;
+ 
+-		for_each_child_of_node(node, child) {
+-			if (of_property_read_bool(child, "usb-role-switch")) {
+-				cdns_sky1_pdata->quirks =
+-					CDNS3_DEFAULT_PM_RUNTIME_ALLOW;
+-				of_node_put(child);
++		device_for_each_child_node(dev, child) {
++			if (fwnode_property_read_bool(child, "usb-role-switch")) {
++				has_role_switch = true;
++				fwnode_handle_put(child);
+ 				break;
+ 			}
+ 		}
++
++		/*
++		 * has_role_switch is now correctly detected under both DT
++		 * and ACPI. However, sustained USB-C storage I/O across a
++		 * runtime-PM D3 suspend/resume cycle on this ACPI platform
++		 * has not yet been validated by the cix-sources 7.1 USB
++		 * storage-hardening series (reset/PHY/IRQ lifecycle work).
++		 * Until that validation is complete, keep every CDNSP
++		 * controller - including OTG/USB-C ones with a role switch -
++		 * out of runtime PM D3, to avoid combining an unvalidated
++		 * suspend/resume path with active storage traffic. Flip
++		 * cdnsp_sky1_runtime_pm_allow_otg to true once stress testing
++		 * confirms wake-from-D3 reliability via rts5453.
++		 */
++		if (has_role_switch) {
++			dev_info(dev,
++				 "usb-role-switch present: runtime PM D3 %s\n",
++				 cdnsp_sky1_runtime_pm_allow_otg ?
++				 "allowed" : "forced off during storage validation");
++			if (cdnsp_sky1_runtime_pm_allow_otg)
++				cdns_sky1_pdata->quirks =
++					CDNS3_DEFAULT_PM_RUNTIME_ALLOW;
++		}
+ 	}
+ 	if (!ACPI_COMPANION(dev)) {
+ 		cdns_sky1_auxdata->platform_data = cdns_sky1_pdata;

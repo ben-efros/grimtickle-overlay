@@ -1,0 +1,48 @@
+From: Ben Efros
+Date: Wed, 30 Jul 2026 01:51:00 -0700
+Subject: usb: cdns3: sky1: force-disable SuperSpeedPlus (10Gbps) pending further stability work
+
+Despite the full hardening effort in the preceding patches (PHY reset
+sequencing and error propagation, ACPI resource-lookup readiness and
+bounded defer, xHCI/CDNSP reset-failure propagation, and the RTS5453
+SMBus ARA rewrite), sustained 10Gbps (SuperSpeedPlus / USB 3.1 Gen2)
+traffic on the MS-R1's cdnsp-sky1 / cix-usbdp-phy stack still produced
+periodic device resets under load in real-world testing. Capping the
+controller at Gen1 (5Gbps) has proven stable.
+
+Unconditionally force data->ssp_disable = true in cdnsp_sky1_probe(),
+regardless of the "ssp-disable" ACPI _DSD property, so this
+degradation applies even if firmware does not set the property. This
+is a pragmatic stability workaround, not a confirmed root-cause fix -
+the actual source of 10Gbps instability has not been conclusively
+identified. Suspected causes investigated during this series are
+recorded in separate (uncommitted) note files for follow-up; none of
+them were confirmed as the definitive root cause, which is why this
+workaround is being applied now rather than a targeted fix.
+
+---
+ drivers/usb/cdns3/cdnsp-sky1.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+--- a/drivers/usb/cdns3/cdnsp-sky1.c
++++ b/drivers/usb/cdns3/cdnsp-sky1.c
+@@ -726,6 +726,19 @@
+ 	data->u3_disable = device_property_read_bool(dev, "u3-port-disable");
+ 	data->ssp_disable = device_property_read_bool(dev, "ssp-disable");
+ 
++	/*
++	 * Force SuperSpeedPlus (10Gbps) off unconditionally, regardless of
++	 * the "ssp-disable" ACPI property. Sustained 10Gbps I/O on the
++	 * MS-R1's cdnsp-sky1/cix-usbdp-phy stack remained unreliable
++	 * (periodic device resets under load) even after the full PHY
++	 * reset-sequencing, ACPI resource-lookup, and RTS5453 ARA hardening
++	 * done in the preceding patches. Capping at Gen1/5Gbps is a
++	 * pragmatic stability workaround, not a confirmed root-cause fix -
++	 * see the accompanying note files for suspected causes still under
++	 * investigation.
++	 */
++	data->ssp_disable = true;
++
+ 	if (!device_property_read_u32(dev, "sof_clk_freq", &ret))
+ 		data->sof_clk_freq = ret;
+ 	else
