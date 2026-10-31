@@ -49,3 +49,9 @@ keeps the 7.2.9 findings for history.
 | 07 | [decisions-7.3.1-r1](07-decisions-7.3.1-r1.md) | Decision log for this round: what was fixed, adopted, rejected, and why; hardware verification results |
 | 08 | [armbian-patch-evaluation](08-armbian-patch-evaluation.md) | Armbian `cix-6.18`, `cix-7.1`, `uefi-arm64-dt-7.3` vs this kernel |
 | 09 | [ms-r1-npu-hack-evaluation](09-msr1-npu-hack-evaluation.md) | `FyrbyAdditive/ms-r1-npu-hack` (SSDT + driver patch): fit, BIOS dependence, integration plan |
+
+## USB / 10 Gbps addendum (2026-10-31)
+
+| # | Report | Scope |
+|---|---|---|
+| 10 | [usb-controller-and-10gbps-analysis](10-usb-controller-and-10gbps-analysis.md) | MS-R1 USB controller/PHY/port topology, current 5 Gbps bottleneck (forced SuperSpeedPlus disable), UAS/BOT state, and the plan to reach 10 Gbps USB-SATA links |
