@@ -156,10 +156,64 @@ boot entry. Results are in §Verification below.
   `pci-sky1-cix.o`, `pci-sky1-acpi.o` and `gpio-cadence.o` compile
   without new warnings/errors.
 * Boot: the resulting `7.3.1-cix-review` UKI was installed alongside the
-  existing 7.1.5/7.2.9 entries and selected with a **one-shot** boot
-  entry (`bootctl set-oneshot`), so a failed boot falls back to the
-  previous default on the next reset. Evidence collected after boot is
-  summarised below; full logs are quoted where they matter in doc 06.
+  existing 7.1.5/7.2.9 entries. Gentoo `installkernel`'s
+  `kernel-bootcfg --add-uki --once` creates an EFI boot entry for it and
+  sets a **one-time EFI `BootNext`** for the initial attempt; the
+  persistent `BootOrder`/default is not changed, so a failed or hung
+  boot falls back to the previous kernel on the next reset
+  (`panic=30` handles a panicking kernel). Evidence collected after boot
+  is summarised below; full logs are quoted where they matter in doc 06.
+
+
+### Boot procedure used
+
+1. `make modules_install` then `make install` in the test tree.
+   `installkernel` (`layout=uki`, dracut + ukify) writes
+   `/boot/EFI/Linux/<machine-id>-7.3.1-cix-review.efi`.
+2. Gentoo's `95-efistub-kernel-bootcfg.install` runs
+   `kernel-bootcfg --add-uki ... --once`, which creates a new EFI boot
+   entry and sets the UEFI **`BootNext`** variable for that entry only.
+   The persistent `BootOrder`/default entry is untouched.
+3. Verify with `efibootmgr` that `BootNext` is the new entry, then
+   reboot. UEFI consumes `BootNext` on the next boot; a panicking kernel
+   additionally reboots after `panic=30` into the normal `BootOrder`
+   (7.1.5).
+4. After collecting evidence, return to the default kernel with another
+   one-time `efibootmgr -n <7.1.5 entry>` + reboot, so the node does not
+   stay on the test kernel.
+
+
+### Boot result — PASS (7.3.1-cix-review)
+
+The MS-R1 booted the 7.3.1 test UKI via one-time UEFI `BootNext`
+(`Boot000B`, `kernel-bootcfg --once`); `BootNext` was consumed and the
+persistent `BootOrder` (first entry = 7.1.5) was not modified.
+
+| Check | 7.1.5 baseline | 7.3.1-cix-review |
+|---|---|---|
+| kernel | `7.1.5-cix` | `7.3.1-cix-review` |
+| ACPI scan handler | MCFG `CIXTEK/SKY1EDK2` detected | same (`Sky1 PCIe: registering ACPI scan handler`) |
+| `PNP0A08` blocked / `CIXH2020` pdevs | 5 | 5 (`sky1-pcie-cix.2`-`.6.auto`, 10 resources each) |
+| Root buses / host bridges | 5 (`00`, `30`, `60`, `90`, `c0`) | 5, same bus numbers |
+| mainline `sky1-pcie` driver bound devices | 0 (driver present) | **0** (entry exists, no bound devices — 0184 works) |
+| vendor `sky1-pcie-cix` bound devices | 5 (`sky1-pcie.*.auto`) | 5 (`sky1-pcie-cix.*.auto`, 0184) |
+| RTL8127 endpoints | 2 (`01:00.0`, `31:00.0`), 10G link | 2, `enp1s0` Link Up 10Gbps |
+| NVMe endpoints | 3 (`61`, `91`, `c1`) | 3, all `nvme` namespaces present |
+| AER / local IRQ counts | 0 | 0 (no spurious AER) |
+| dmesg WARNING/BUG/SError/Oops | none | none in the PCIe/Sky1 paths |
+| GPIO banks | 7 (32/32/32/17/32/10/10) | same; PCIe `reset` lines out hi |
+| system state | running, ceph healthy | `system running`, 0 failed units, Ceph OSD/MON/MDS up |
+| ramoops | n/a (old dmesg) | `ramoops PRP0001:03: probe failed -22`; pre-existing ACPI/ramoops issue, unrelated to this review |
+
+The 7.3.1 boot reached user space, brought up both 10GbE ports and all
+three NVMe namespaces, and left AER/interrupt counters at zero. The
+one-time entry was then reverted with a second one-time `BootNext` to
+the 7.1.5 entry, restoring the default kernel.
+
+Limits: the boot proves the happy path, not the newly fixed error paths
+(AER storm, PME wake, power-enable timeout, clock lookup failure). Those
+fixes remain statically verified; injecting PCIe errors on a production
+Ceph node was out of scope.
 
 ## Rejected alternatives (summary)
 
