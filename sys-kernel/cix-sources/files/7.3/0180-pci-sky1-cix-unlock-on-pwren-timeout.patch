@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-cix: release init mutex on power-enable timeout
+
+The x2/x1 branch of sky1_pcie_set_pwr_en() takes sky1_init_mutex
+before polling the power-enable status bit, but returns -ETIMEDOUT on
+timeout without unlocking it.  All later clock, reset, PHY and
+enumeration helpers take the same mutex, so a single power-enable
+timeout deadlocks the remaining PCIe controller probes and suspend/
+resume paths instead of failing that one controller.
+
+Unlock before returning.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0180-pci-sky1-cix-unlock-on-pwren-timeout.patch | 1 +
+ 1 file changed, 1 insertions(+), 0 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-cix.c
++++ b/drivers/pci/controller/cadence/pci-sky1-cix.c
+@@ -915,6 +915,7 @@
+ 				ret = readl_poll_timeout(status_addr, read, !!(read&0x200), 5, 100);
+ 				if (ret) {
+ 					dev_err(dev, "Set pwr en err, 0x%x\n", read);
++					mutex_unlock(&sky1_init_mutex);
+ 					return -ETIMEDOUT;
+ 				}
+ 

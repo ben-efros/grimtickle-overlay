@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-cix: avoid NULL dereference when no endpoint bus exists
+
+sky1_pcie_get_ep_pci_dev() is reached from the PME work item and from
+both AER interrupt paths.  It walks bridge->bus->children and then
+root_bus->devices without checking either pointer.
+
+The host bridge's root bus is not populated until the link is up, and
+the function is also called from paths that can run while the link is
+down or the endpoint has been removed (PME wake, AER storm on a failed
+link).  A NULL bridge->bus or the absence of any child bus makes the
+walk dereference NULL.
+
+Bail out with NULL before each walk when the required bus object does
+not exist; callers already handle a NULL endpoint.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0178-pci-sky1-cix-guard-ep-lookup-against-missing-bus.patch | 7 +++++++
+ 1 file changed, 7 insertions(+), 0 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-cix.c
++++ b/drivers/pci/controller/cadence/pci-sky1-cix.c
+@@ -309,12 +309,19 @@
+ 	if (!bridge)
+ 		return NULL;
+ 
++	/* The root bus may not exist yet while the link is still down. */
++	if (!bridge->bus)
++		return NULL;
++
+ 	list_for_each_entry(child, &bridge->bus->children, node) {
+ 		if (child->parent == bridge->bus) {
+ 			root_bus = child;
+ 			break;
+ 		}
+ 	}
++
++	if (!root_bus)
++		return NULL;
+ 
+ 	list_for_each_entry(pdev, &root_bus->devices, bus_list) {
+ 		if (PCI_SLOT(pdev->devfn) == 0) {

@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-acpi: name synthetic platform devices after the vendor driver
+
+The ACPI scan handler creates its filtered platform devices with the
+name "sky1-pcie".  That is also the exact driver-name of the mainline
+pci-sky1.c host driver now shipped in Linux 7.3, so platform_match()'s
+last-resort name comparison can bind those devices to the wrong driver
+before the vendor pci-sky1-cix driver gets a chance (the mainline driver
+uses PROBE_PREFER_ASYNCHRONOUS, which makes the outcome depend on
+initcall/probe ordering).
+
+The mainline probe then fails on the missing DT-only named resources
+with a confusing -ENODEV, or -- if the CIX resource-name injection has
+already run -- could partially claim the same controller.
+
+Name the synthetic device "sky1-pcie-cix", matching the vendor driver's
+name and ACPI HID binding, so the two drivers can never collide by name.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0184-pci-sky1-acpi-name-pdev-after-vendor-driver.patch | 2 +-
+ 1 file changed, 1 insertions(+), 1 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-acpi.c
++++ b/drivers/pci/controller/cadence/pci-sky1-acpi.c
+@@ -100,7 +100,7 @@
+ 	 * The ACPI companion is bound post-registration (see below) so
+ 	 * bus_find_device_by_acpi_dev() works for RSTL reset lookups.
+ 	 */
+-	pdevinfo.name = "sky1-pcie";
++	pdevinfo.name = "sky1-pcie-cix";
+ 	pdevinfo.id = PLATFORM_DEVID_AUTO;
+ 	pdevinfo.res = resources;
+ 	pdevinfo.num_res = count;

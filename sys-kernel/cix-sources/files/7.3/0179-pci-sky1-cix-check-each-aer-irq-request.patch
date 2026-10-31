@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-cix: check every AER IRQ request
+
+sky1_pcie_request_irq() invoked devm_request_threaded_irq() three
+times but only tested the third return value, so a failure to request
+the correctable or fatal AER interrupt was silently discarded and probe
+continued with an unhandled error interrupt.
+
+Check each request independently and report which one failed.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0179-pci-sky1-cix-check-each-aer-irq-request.patch | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-cix.c
++++ b/drivers/pci/controller/cadence/pci-sky1-cix.c
+@@ -694,15 +694,24 @@
+ 	ret = devm_request_threaded_irq(pcie->dev, pcie->aer_c_irq, NULL,
+ 					sky1_pcie_aer_irq_handler, IRQF_ONESHOT,
+ 					"pcie-aer-c", pcie);
++	if (ret) {
++		dev_err(pcie->dev, "failed to request PCIe AER correctable IRQ\n");
++		return ret;
++	}
++
+ 	ret = devm_request_threaded_irq(pcie->dev, pcie->aer_f_irq, NULL,
+ 					sky1_pcie_aer_irq_handler, IRQF_ONESHOT,
+ 					"pcie-aer-f", pcie);
++	if (ret) {
++		dev_err(pcie->dev, "failed to request PCIe AER fatal IRQ\n");
++		return ret;
++	}
++
+ 	ret = devm_request_threaded_irq(pcie->dev, pcie->aer_nf_irq, NULL,
+ 					sky1_pcie_aer_irq_handler, IRQF_ONESHOT,
+ 					"pcie-aer-nf", pcie);
+ 	if (ret) {
+-		dev_err(pcie->dev,
+-			"failed to request PCIe AER IRQ\n");
++		dev_err(pcie->dev, "failed to request PCIe AER non-fatal IRQ\n");
+ 		return ret;
+ 	}
+ 

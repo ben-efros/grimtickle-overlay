@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-cix: fix AER root-command write address
+
+The Root AER re-enable in sky1_pcie_handle_rp_aer_irq() wrote the
+Root Command register value to the *PCI Express capability* base plus
+PCI_ERR_ROOT_COMMAND instead of the *AER extended capability* base
+used by the matching read and by the disable step a few lines above.
+
+The write therefore landed in the middle of the PCIe capability (inside
+the Link Capabilities/Link Status area) and left the Root Command
+interrupt-enable bits in whatever state the disable step had put them in,
+so a single AER interrupt permanently disabled Root AER reporting for
+that port.
+
+Use aer_offset for the write, matching the read and the disable path.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0177-pci-sky1-cix-fix-aer-root-command-write-address.patch | 2 +-
+ 1 file changed, 1 insertions(+), 1 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-cix.c
++++ b/drivers/pci/controller/cadence/pci-sky1-cix.c
+@@ -568,7 +568,7 @@
+ 	reg32 = readl(reg_base + aer_offset + PCI_ERR_ROOT_COMMAND);
+ 	reg32 |= PCI_ERR_ROOT_CMD_COR_EN | PCI_ERR_ROOT_CMD_NONFATAL_EN |
+ 		 PCI_ERR_ROOT_CMD_FATAL_EN;
+-	writel(reg32, reg_base + offset + PCI_ERR_ROOT_COMMAND);
++	writel(reg32, reg_base + aer_offset + PCI_ERR_ROOT_COMMAND);
+ }
+ 
+ static void sky1_pcie_handle_ep_aer_irq(struct sky1_pcie *pcie)

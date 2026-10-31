@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] pci: sky1-cix: propagate clock lookup failures from probe
+
+sky1_pcie_parse_clocks() records a failing clk_get() error in ret but
+then keeps going, overwrites ret on the next lookup, and returns 0 at
+the end.  Probes therefore continue with ERR_PTR() clocks stored in
+struct sky1_pcie; the first clk_prepare_enable()/clk_disable_unprepare()
+on such a clock either dereferences the error pointer or silently does
+nothing depending on the clock core, and the controller is left
+half-initialised.
+
+Return the real error from each required lookup (axi, apb, and refclk_b
+unless it is genuinely absent), and return the accumulated status at the
+end of the non-ACPI path.  The optional refclk_b -ENOENT case still
+yields NULL as before.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0181-pci-sky1-cix-propagate-clk-lookup-failures.patch | 16 ++++++++++++----
+ 1 file changed, 12 insertions(+), 4 deletions(-)
+
+--- a/drivers/pci/controller/cadence/pci-sky1-cix.c
++++ b/drivers/pci/controller/cadence/pci-sky1-cix.c
+@@ -1281,6 +1281,7 @@
+ 			if (IS_ERR(axi_clk)) {
+ 				ret = PTR_ERR(axi_clk);
+ 				dev_err(dev, "Failed to get axi_clk\n");
++				return ret;
+ 			} else {
+ 				ret = devm_add_action_or_reset(dev, sky1_pcie_clk_release,
+ 							       axi_clk);
+@@ -1293,6 +1294,7 @@
+ 			if (IS_ERR(apb_clk)) {
+ 				ret = PTR_ERR(apb_clk);
+ 				dev_err(dev, "Failed to get apb_clk\n");
++				return ret;
+ 			} else {
+ 				ret = devm_add_action_or_reset(dev, sky1_pcie_clk_release,
+ 							       apb_clk);
+@@ -1308,6 +1310,7 @@
+ 				} else {
+ 					ret = PTR_ERR(refclk);
+ 					dev_err(dev, "failed to get refclk_b\n");
++					return ret;
+ 				}
+ 			} else {
+ 				ret = devm_add_action_or_reset(dev, sky1_pcie_clk_release,
+@@ -1317,7 +1320,7 @@
+ 			}
+ 			pcie->pcie_refclk_b = refclk;
+ 
+-			return 0;
++			return ret;
+ 		}
+ 	}
+ #endif
+@@ -1326,6 +1329,7 @@
+ 	if (IS_ERR(axi_clk)) {
+ 		ret = PTR_ERR(axi_clk);
+ 		dev_err(dev, "Failed to get axi_clk\n");
++		return ret;
+ 	}
+ 	pcie->pcie_axi_clk = axi_clk;
+ 
+@@ -1333,6 +1337,7 @@
+ 	if (IS_ERR(apb_clk)) {
+ 		ret = PTR_ERR(apb_clk);
+ 		dev_err(dev, "Failed to get apb_clk\n");
++		return ret;
+ 	}
+ 	pcie->pcie_apb_clk = apb_clk;
+ 
+@@ -1358,6 +1363,7 @@
+ 				} else {
+ 					ret = PTR_ERR(refclk);
+ 					dev_err(dev, "failed to get refclk_b\n");
++					return ret;
+ 				}
+ 			} else {
+ 				ret = devm_add_action_or_reset(dev, sky1_pcie_clk_release,
+@@ -1370,6 +1376,7 @@
+ 			if (IS_ERR(refclk)) {
+ 				ret = PTR_ERR(refclk);
+ 				dev_err(dev, "failed to get refclk_b\n");
++				return ret;
+ 			}
+ 		}
+ 	}
+@@ -1378,11 +1385,12 @@
+ 	if (IS_ERR(refclk)) {
+ 		ret = PTR_ERR(refclk);
+ 		dev_err(dev, "failed to get refclk_b\n");
+-	}
+-#endif
++		return ret;
++	}
++	#endif
+ 	pcie->pcie_refclk_b = refclk;
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int sky1_pcie_parse_plat(struct sky1_pcie *pcie)

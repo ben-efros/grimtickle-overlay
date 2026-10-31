@@ -37,3 +37,15 @@ that are not part of the repository.
   device field but not the child's stored copy. Triggers only on wrapper unload
   while the child stays bound. Fix direction: copy the needed fields in
   cdns3-plat.c instead of holding the pointer, or unbind the child on removal.
+
+## cix-sources-7.3.1-r1 round (2026-10-31)
+
+The 7.3.1 review supersedes the 7.2.9 reports for the 7.3 lineage but
+keeps the 7.2.9 findings for history.
+
+| # | Report | Scope |
+|---|---|---|
+| 06 | [7.3.1-pci-sky1-review](06-7.3.1-pci-sky1-review.md) | PCIe driver (0030/0031/0032/0035/0039 + 0007/0170/0172) and Sky1 platform review, with the 0182-0184 cross-checks |
+| 07 | [decisions-7.3.1-r1](07-decisions-7.3.1-r1.md) | Decision log for this round: what was fixed, adopted, rejected, and why; hardware verification results |
+| 08 | [armbian-patch-evaluation](08-armbian-patch-evaluation.md) | Armbian `cix-6.18`, `cix-7.1`, `uefi-arm64-dt-7.3` vs this kernel |
+| 09 | [ms-r1-npu-hack-evaluation](09-msr1-npu-hack-evaluation.md) | `FyrbyAdditive/ms-r1-npu-hack` (SSDT + driver patch): fit, BIOS dependence, integration plan |

@@ -129,3 +129,25 @@ These 7.2.9-era local/adopted patches are intentionally **not** present in
   `00111`-`00116` rework; see `0092` above — the vendor 7.3 patches are now the
   working form directly, so none of the 7.2.9 panthor patches were carried
   forward.
+
+## cix-sources-7.3.1-r1 — local review patches (0177-0184)
+
+These patches are not from a third-party patch set; they are local
+fixes written for this overlay after the 7.3.1 PCIe/Sky1 review
+(`audit/06-7.3.1-pci-sky1-review.md`). Each is GPL-2.0, matching the
+kernel.
+
+| Overlay patch | Origin |
+|---|---|
+| `0177-pci-sky1-cix-fix-aer-root-command-write-address.patch` | local |
+| `0178-pci-sky1-cix-guard-ep-lookup-against-missing-bus.patch` | local |
+| `0179-pci-sky1-cix-check-each-aer-irq-request.patch` | local |
+| `0180-pci-sky1-cix-unlock-on-pwren-timeout.patch` | local |
+| `0181-pci-sky1-cix-propagate-clk-lookup-failures.patch` | local |
+| `0182-gpio-cadence-mask-irq-writes-to-implemented-width.patch` | adapted from Armbian `patch/kernel/archive/cix-6.18/2001-gpio-gpio-cadence-fix-crashing-pcie-on-cix-p1-acpi-s.patch` (CIX original author: Jianfeng Liu); width-masking half only |
+| `0183-arm64-dts-cix-fix-sky1-pcie-x2-rcsu-addresses.patch` | adapted from Armbian `patch/kernel/archive/uefi-arm64-dt-7.3/1001-sky1-pcie-x2-fix.patch` |
+| `0184-pci-sky1-acpi-name-pdev-after-vendor-driver.patch` | local |
+
+The Armbian-derived patches are GPL-2.0 (kernel); see
+`audit/08-armbian-patch-evaluation.md` for the evaluation and the
+rationale for taking only the noted halves.

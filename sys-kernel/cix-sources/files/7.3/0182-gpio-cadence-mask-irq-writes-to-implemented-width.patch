@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:30:00 2026 -0700
+Subject: [PATCH] gpio: cadence: mask IRQ register writes to the implemented width
+
+The Sky1 ACPI support patch inverted its saved IRQ mask into
+CDNS_GPIO_IRQ_EN without restricting the write to the number of GPIOs
+the bank actually implements, and did the same with wake_active when
+masking interrupts on suspend/shutdown.  Both flip every bit above the
+implemented width to 1 as well.
+
+On a 32-pin bank that is harmless, but the Sky1 banks are not all
+32-pin (the live MS-R1 exposes banks with 10 and 17 GPIOs) and some
+Cadence instances use fewer ngpios.  Writing enable/wake bits for
+unimplemented pins is at best undefined register behaviour; it can
+enable an interrupt line that has no consumer.
+
+Constrain all three writes to GENMASK(ngpio - 1, 0), matching what the
+driver already does for IRQ_DIS at probe time.  This mirrors the
+corresponding fix carried by Armbian's CIX patch set.
+
+Adopted from Armbian patch/kernel/archive/cix-6.18/2001 (CIX original
+author: Jianfeng Liu), narrowed to the width fixes; the
+preserve_firmware_config behaviour change in that patch is intentionally
+not taken (see audit decisions).
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0182-gpio-cadence-mask-irq-writes-to-implemented-width.patch | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+--- a/drivers/gpio/gpio-cadence.c
++++ b/drivers/gpio/gpio-cadence.c
+@@ -221,9 +221,10 @@
+ 
+ static void cdns_gpio_restore_regs(struct cdns_gpio_chip *cgpio)
+ {
++	u32 all = GENMASK(cgpio->gen_gc.gc.ngpio - 1, 0);
++
+ 	/* Disable all IRQs before restore to prevent spurious firing */
+-	iowrite32(GENMASK(cgpio->gen_gc.gc.ngpio - 1, 0),
+-		  cgpio->regs + CDNS_GPIO_IRQ_DIS);
++	iowrite32(all, cgpio->regs + CDNS_GPIO_IRQ_DIS);
+ 
+ 	iowrite32(cgpio->saved_regs.bypass_mode, cgpio->regs + CDNS_GPIO_BYPASS_MODE);
+ 	iowrite32(cgpio->saved_regs.direction_mode, cgpio->regs + CDNS_GPIO_DIRECTION_MODE);
+@@ -232,8 +233,13 @@
+ 	iowrite32(cgpio->saved_regs.irq_type, cgpio->regs + CDNS_GPIO_IRQ_TYPE);
+ 	iowrite32(cgpio->saved_regs.irq_value, cgpio->regs + CDNS_GPIO_IRQ_VALUE);
+ 	iowrite32(cgpio->saved_regs.irq_any_edge, cgpio->regs + CDNS_GPIO_IRQ_ANY_EDGE);
+-	/* IRQ_EN is write-to-set: re-enable only previously enabled IRQs */
+-	iowrite32(~cgpio->saved_regs.irq_en, cgpio->regs + CDNS_GPIO_IRQ_EN);
++	/*
++	 * IRQ_EN is write-to-set.  saved_regs.irq_en holds IRQ_MASK
++	 * (1 = masked), so re-enable only previously unmasked IRQs and
++	 * constrain the write to the implemented GPIO width.
++	 */
++	iowrite32((~cgpio->saved_regs.irq_en) & all,
++		  cgpio->regs + CDNS_GPIO_IRQ_EN);
+ }
+ 
+ static void cdns_gpio_sky1_set_wake(struct cdns_gpio_chip *cgpio, bool suspend)
+@@ -251,11 +257,12 @@
+ static int cdns_gpio_suspend(struct device *dev)
+ {
+ 	struct cdns_gpio_chip *cgpio = dev_get_drvdata(dev);
++	u32 all = GENMASK(cgpio->gen_gc.gc.ngpio - 1, 0);
+ 
+ 	cdns_gpio_save_regs(cgpio);
+ 
+ 	/* Mask non-wake interrupts */
+-	iowrite32(~cgpio->wake_active, cgpio->regs + CDNS_GPIO_IRQ_DIS);
++	iowrite32(all & ~cgpio->wake_active, cgpio->regs + CDNS_GPIO_IRQ_DIS);
+ 
+ 	cdns_gpio_sky1_set_wake(cgpio, true);
+ 
+@@ -289,9 +296,10 @@
+ static void cdns_gpio_shutdown(struct platform_device *pdev)
+ {
+ 	struct cdns_gpio_chip *cgpio = platform_get_drvdata(pdev);
++	u32 all = GENMASK(cgpio->gen_gc.gc.ngpio - 1, 0);
+ 
+ 	/* Mask non-wake interrupts */
+-	iowrite32(~cgpio->wake_active, cgpio->regs + CDNS_GPIO_IRQ_DIS);
++	iowrite32(all & ~cgpio->wake_active, cgpio->regs + CDNS_GPIO_IRQ_DIS);
+ 
+ 	cdns_gpio_sky1_set_wake(cgpio, true);
+ 
