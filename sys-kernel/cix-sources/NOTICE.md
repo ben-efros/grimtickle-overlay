@@ -89,6 +89,22 @@ port patch rather than as a numbered patch. It is adopted separately here:
 |---|---|---|
 | `0187-drm-cix-dptx-recover-wedged-aux-engine.patch` | none | `linux-cix-sky1-ncz-7.3-rc7/sky1-ncz-v7.3-rc7-port.patch`, `drivers/gpu/drm/cix/dptx/trilin_dptx.c` (`trilin_dp_aux_recover_max`, `trilin_dp_aux_engine_busy()`, `trilin_dp_aux_engine_reinit()`, retry in `trilin_dp_aux_transfer()`, recovery in `trilin_dp_core_on()`); adapted to this overlay's 26q2-based driver and its HPD/iter AUX loop. The ncz 2 ms busy-drain poll in `trilin_dp_aux_cmd_submit()` is intentionally not taken — the transfer-level retry already rides out a draining engine without lengthening the `aux->hw_mutex` hold. |
 
+The ncz 7.3-rc7 BSP also carries the audss ACPI parent-clock resolution as
+its numbered patch 0008; only the composite/fixed-factor half is new here,
+because `00053` already acquires and rates the four root parents through their
+CLKT connection IDs:
+
+| Overlay patch (7.3) | 7.2.9 patch | Source |
+|---|---|---|
+| `0188-clk-cix-audss-resolve-acpi-parent-clocks-by-connection-id.patch` | none | `linux-cix-sky1-ncz-7.3-rc7/0008-clk-cix-sky1-audss-resolve-ACPI-parent-clocks-by-con.patch` (`drivers/clk/cix/clk-sky1-audss.c`): composite parents get `.fw_name` + `.name` with `index = -1`, so `clk_core_get()` tries the audss device's CLKT connection-ID (clkdev) lookup before the global name — under ACPI the external parents' global names are not `audio_clk*`, which left every I2S mux and both `audio_clk4/5` dividers orphaned (`clk_get_rate()` 0, `cdns-i2s-mc ... clk freq 0 is too low`, failed playback); the `audio_clk4_div2/div4` and `audio_clk5_div2` fixed factors are also registered against the parent `clk` actually obtained by `sky1_audss_clks_get()` (indices 2/3), keeping the old global-name registration as a fallback. ncz's `acpi_clk_names` devtype field and `has_acpi_companion()` retry in `sky1_audss_clks_get()` are not taken: `00053`'s `sky1_acpi_devtype_data` already covers that root-parent lookup. |
+
+The ncz 7.3-rc7 BSP also carries a standalone pinctrl-acpi consumer-deferral
+and refcounting fix as its numbered patch 0006, adopted separately here:
+
+| Overlay patch (7.3) | 7.2.9 patch | Source |
+|---|---|---|
+| `0189-pinctrl-acpi-defer-consumers-until-pin-controller-registers.patch` | none | `linux-cix-sky1-ncz-7.3-rc7/0006-pinctrl-acpi-defer-consumers-until-the-named-pin-con.patch`, ported unchanged onto the vendor `drivers/pinctrl/pinctrl-acpi.c` added by this overlay's `0048-pinctrl-sky1-add-acpi-support.patch`: all three `get_pinctrl_dev_from_acpi_name()` call sites return `-EPROBE_DEFER`/`-ENODEV` (via `driver_deferred_probe_check_state()`) and report through `dev_err_probe()`, the `acpi_get_acpi_dev()` reference is dropped with `acpi_put_acpi_dev()`, and `pinctrl_acpi_to_map()` frees the maps it already registered on failure. ncz's separate 0177-style `acpi_pinctrl_group_present()` optional-absent-group skip is not part of this fix and is not carried. |
+
 ### srcshelton / gentoo-ebuilds
 
 A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebuilds>.

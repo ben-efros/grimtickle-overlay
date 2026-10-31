@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:55:00 2026 -0700
+Subject: [PATCH] clk: cix: sky1-audss: resolve ACPI parent clocks by
+ connection ID
+
+On ACPI boots of the Sky1 (MS-R1) every composite I2S mux and the
+audio_clk4_div2/div4 and audio_clk5_div2 fixed-factor dividers stay
+orphaned, so clk_get_rate() on an I2S clock returns 0 and opening the
+HDMI/DP sink logs hundreds of
+
+  cdns-i2s-mc CIXH6011:02: clk freq 0 is too low, must greater then ...
+  cdns-i2s-mc CIXH6011:02: ASoC error (-22): at snd_soc_dai_hw_params()
+
+and playback fails. The v7.2.7 vendor driver avoided this by using
+parent_data.fw_name, which resolves through clkdev on the provider
+device.
+
+This overlay's 00053 only acquires the four root parents by their CLKT
+connection IDs (audio_clk0/2/4/5) and applies their default rates; it
+does not touch the downstream parents. This patch ports that half of
+ncz's 0008:
+
+- give every composite parent both .fw_name and .name, with index -1, so
+  clk_core_get() tries the per-device connection-ID (clkdev) lookup first
+  and falls back to the global name. Under ACPI the external parents are
+  CLKT clkdev entries published by the ACLK provider and their global
+  names are not audio_clk*, so a name-only lookup always missed; internal
+  parents (audio_clk4_div2, ...) have no connection ID and still resolve
+  by global name.
+- register audio_clk4_div2/div4 and audio_clk5_div2 against the parent
+  clk already obtained by sky1_audss_clks_get() (indices 2/3, i.e.
+  sys/48m in the DT devtype data and audio_clk4/5 in the ACPI one), with
+  the previous global-name registration kept as a fallback.
+
+Not taken from ncz 0008: its separate acpi_clk_names devtype field and
+the has_acpi_companion() retry in sky1_audss_clks_get(). 00053 already
+solves that differently (a second sky1_acpi_devtype_data whose .clk_names
+are the audio_clk* connection IDs), so there is no delta to port. The
+"continue without the clock" warning path in ncz's version does not exist
+in this tree: sky1_audss_clks_get() fails probe instead, so priv->clks[2]
+and [3] are always valid and the name fallback in
+sky1_audss_register_fixed_div() is defensive only.
+
+Source: ncz-os/meta-cix (Jason Perlow <jperlow@gmail.com>)
+        linux-cix-sky1-ncz-7.3-rc7/0008-clk-cix-sky1-audss-resolve-ACPI-parent-clocks-by-con.patch
+Adopted: grimtickle-overlay 7.3.1; see NOTICE.md.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0188-clk-cix-audss-resolve-acpi-parent-clocks-by-connection-id.patch | 60 +++++++++++++++++++++++++++++++++++++++++-----------------------
+ 1 file changed, 44 insertions(+), 16 deletions(-)
+
+--- a/drivers/clk/cix/clk-sky1-audss.c
++++ b/drivers/clk/cix/clk-sky1-audss.c
+@@ -1007,8 +1007,22 @@
+ 	if (!parent_data)
+ 		return ERR_PTR(-ENOMEM);
+ 
+-	for (i = 0; i < num_parents; i++)
++	/*
++	 * Resolve each parent by connection ID on this device first, then by
++	 * global name. Under ACPI the external parents (audio_clk0..5) are
++	 * clkdev entries from the ACLK CLKT table whose clocks are not named
++	 * audio_clk* globally, so a global-name-only lookup leaves every mux
++	 * orphaned: clk_get_rate() on an I2S clock returns 0 and cdns-i2s-mc
++	 * rejects hw_params ("clk freq 0 is too low"). Setting @fw_name makes
++	 * clk_core_get() try the per-device connection-ID lookup; on miss it
++	 * still falls back to the global @name. Internal parents
++	 * (audio_clk4_div2, ...) have no connection ID and resolve by name.
++	 */
++	for (i = 0; i < num_parents; i++) {
++		parent_data[i].fw_name = parent_names[i];
+ 		parent_data[i].name = parent_names[i];
++		parent_data[i].index = -1;
++	}
+ 
+ 	if (mux_cfg->offset >= 0) {
+ 		sky1_mux = devm_kzalloc(dev, sizeof(*sky1_mux), GFP_KERNEL);
+@@ -1133,6 +1147,29 @@
+ 	return 0;
+ }
+ 
++/*
++ * Register a fixed divider of one of the external parents. Use the parent clk
++ * sky1_audss_clks_get() obtained when there is one: under ACPI that clock's
++ * global name is not @parent_name, so a name-based parent would stay
++ * orphaned. Fall back to the global name otherwise.
++ */
++static struct clk_hw *sky1_audss_register_fixed_div(struct device *dev,
++						    struct sky1_audss_clks_priv *priv,
++						    const char *name,
++						    const char *parent_name,
++						    int parent_idx,
++						    unsigned int div)
++{
++	struct clk *parent = priv->clks[parent_idx];
++
++	if (!IS_ERR_OR_NULL(parent))
++		return devm_clk_hw_register_fixed_factor_parent_hw(dev, name,
++								   __clk_get_hw(parent),
++								   0, 1, div);
++
++	return devm_clk_hw_register_fixed_factor(dev, name, parent_name, 0, 1, div);
++}
++
+ static void sky1_audss_clk_rpm_cleanup(void *data)
+ {
+ 	pm_runtime_force_suspend(data);
+@@ -1253,11 +1290,8 @@
+ 
+ 	/* audio_clk4 clock fixed divider */
+ 	clk_table[CLK_AUD_CLK4_DIV2] =
+-		devm_clk_hw_register_fixed_factor(dev,
+-						  "audio_clk4_div2",
+-						  "audio_clk4",
+-						  0,
+-						  1, 2);
++		sky1_audss_register_fixed_div(dev, priv, "audio_clk4_div2", "audio_clk4",
++					      2, 2);
+ 	if (IS_ERR(clk_table[CLK_AUD_CLK4_DIV2])) {
+ 		ret = PTR_ERR(clk_table[CLK_AUD_CLK4_DIV2]);
+ 		dev_err(dev, "failed to register clock %d, ret:%d\n", CLK_AUD_CLK4_DIV2, ret);
+@@ -1265,11 +1299,8 @@
+ 	}
+ 
+ 	clk_table[CLK_AUD_CLK4_DIV4] =
+-		devm_clk_hw_register_fixed_factor(dev,
+-						  "audio_clk4_div4",
+-						  "audio_clk4",
+-						  0,
+-						  1, 4);
++		sky1_audss_register_fixed_div(dev, priv, "audio_clk4_div4", "audio_clk4",
++					      2, 4);
+ 	if (IS_ERR(clk_table[CLK_AUD_CLK4_DIV4])) {
+ 		ret = PTR_ERR(clk_table[CLK_AUD_CLK4_DIV4]);
+ 		dev_err(dev, "failed to register clock %d, ret:%d\n", CLK_AUD_CLK4_DIV4, ret);
+@@ -1278,11 +1309,8 @@
+ 
+ 	/* audio_clk5 clock fixed divider */
+ 	clk_table[CLK_AUD_CLK5_DIV2] =
+-		devm_clk_hw_register_fixed_factor(dev,
+-						  "audio_clk5_div2",
+-						  "audio_clk5",
+-						  0,
+-						  1, 2);
++		sky1_audss_register_fixed_div(dev, priv, "audio_clk5_div2", "audio_clk5",
++					      3, 2);
+ 	if (IS_ERR(clk_table[CLK_AUD_CLK5_DIV2])) {
+ 		ret = PTR_ERR(clk_table[CLK_AUD_CLK5_DIV2]);
+ 		dev_err(dev, "failed to register clock %d, ret:%d\n", CLK_AUD_CLK5_DIV2, ret);
