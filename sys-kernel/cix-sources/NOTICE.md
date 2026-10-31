@@ -1,12 +1,21 @@
 # Third-party patch provenance
 
 This file records the source of patches in this package that were adopted from
-other projects during the 7.2.9 forward-port. All are GPL-2.0 kernel-derivative
-works; each patch file retains (or now carries) a `Source:` header naming its
-origin. Authorship is preserved as found; where an upstream file had no in-file
-author, that is stated explicitly.
+other projects. All are GPL-2.0 kernel-derivative works; each patch file
+retains (or now carries) a `Source:` header naming its origin. Authorship is
+preserved as found; where an upstream file had no in-file author, that is
+stated explicitly.
 
-## ncz-os / meta-cix (Jason Perlow <jperlow@gmail.com>)
+This overlay carries two parallel forward-ports of the vendor CIX kernel:
+`cix-sources-7.2.9` (`files/7.2`) and `cix-sources-7.3.1` (`files/7.3`). The
+7.3.1 local/adopted patch set (`0163`-`0176`) is itself a rebase of most of
+the 7.2.9 round's local/adopted content onto the 7.3.1 CIX-native USB/PHY
+hardening work (`0150`-`0162`); see "## cix-sources-7.3.1 (files/7.3)" below
+for the mapping and for what was intentionally not carried forward.
+
+## cix-sources-7.2.9 (files/7.2)
+
+### ncz-os / meta-cix (Jason Perlow <jperlow@gmail.com>)
 
 Yocto BSP layer for the "nclawzero" distro on CIX Sky1 / Minisforum MS-R1.
 Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
@@ -25,7 +34,7 @@ Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
 | `0101-clocksource-sky1-defer-on-missing-timer-clocks.patch` | `…/patches-7.2/0166-clocksource-sky1-defer-on-missing-timer-clocks.patch` |
 | `0104-clk-cix-remap-clkt-bridge-on-scmi-clocks-bind.patch` | adapted from `…/patches-7.2/0168-clk-cix-sky1-remap-clkt-bridge-on-scmi-clocks-bind.patch` (simplified: no mapped_list dedup) |
 
-## srcshelton / gentoo-ebuilds
+### srcshelton / gentoo-ebuilds
 
 A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebuilds>.
 
@@ -45,7 +54,7 @@ The panthor patch's upstream file carries **no in-file author, `Source:`, or
 and consumes its `patches-7.1`. That pinned commit is the preferred-form source
 of the underlying vendor work.
 
-## Why these replaced the originals
+### Why these replaced the originals
 
 - `0003` (SCMI ACPI) failed 12 of 44 hunks on 7.2.9; ncz's version is a clean
   forward-port that also documents and preserves the fwnode reference-counting
@@ -56,3 +65,67 @@ of the underlying vendor work.
   `00111`-`00116` rework; the srcshelton version is the working 7.2.9 form and
   additionally fixes the `gpu_clk_stacks` lookup and the `selected_coherency`
   UAPI regression.
+
+## cix-sources-7.3.1 (files/7.3)
+
+### ncz-os / meta-cix (Jason Perlow <jperlow@gmail.com>)
+
+Yocto BSP layer for the "nclawzero" distro on CIX Sky1 / Minisforum MS-R1.
+Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
+
+| Overlay patch (7.3) | 7.2.9 patch | Source |
+|---|---|---|
+| `0165-regulator-cix-fix-stale-prot-limit-found.patch` | `0093` | `linux-cix-sky1-ncz-7.2/patches-7.2/0181-regulator-cix-handle-unsupported-pmic-constraints-quietly.patch` |
+| `0170-iommu-smmu-v3-sky1-pcie-bypass-ste.patch` | `0098` | `…/patches-7.2/0100-iommu-smmu-v3-sky1-pcie-bypass-ste-ats-override.patch` |
+| `0171-net-r8169-skip-hw-tally-rtl8127-sky1.patch` | `0099` | `…/patches-7.2/0110-net-r8169-skip-hw-tally-rtl8127-sky1.patch` |
+| `0172-pci-cix-force-clock-pm-off-sky1-endpoints.patch` | `0100` | `…/patches-7.2/0109-pci-cix-force-clock-pm-off-sky1-endpoints.patch` |
+| `0173-clocksource-sky1-defer-on-missing-timer-clocks.patch` | `0101` | `…/patches-7.2/0166-clocksource-sky1-defer-on-missing-timer-clocks.patch` |
+| `0175-clk-cix-remap-clkt-bridge-on-scmi-clocks-bind.patch` | `0104` | adapted from `…/patches-7.2/0168-clk-cix-sky1-remap-clkt-bridge-on-scmi-clocks-bind.patch` (simplified: no mapped_list dedup); hunk 1 context regenerated for the 7.3 baseline's extra `#include <dt-bindings/clock/cix,sky1.h>` line |
+
+### srcshelton / gentoo-ebuilds
+
+A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebuilds>.
+
+| Overlay patch (7.3) | 7.2.9 patch | Source |
+|---|---|---|
+| `0166-topology-has-missing-cpufreq-ref.patch` | `0094` | `files/20050-topology-has-missing-cpufreq-ref.patch` |
+| `0167-platform-acpi-resolve-named-irq-resources.patch` | `0095` | `files/7.2.x/40042-platform-acpi-resolve-named-irq-resources.patch` |
+| `0168-scmi-hwmon-no-of-thermal-zones-on-acpi.patch` | `0096` | `files/30090-scmi-hwmon-do-not-use-of-thermal-zones-on-acpi.patch` |
+| `0169-scmi-perf-rational-frequency-conversion.patch` | `0097` | `files/30195-firmware-arm-scmi-use-rational-perf-frequency-conversion.patch` |
+
+### Not carried forward from the 7.2.9 lineage
+
+These 7.2.9-era local/adopted patches are intentionally **not** present in
+`files/7.3`:
+
+- `0089` (`usb-cdns3-sky1-declare-phy-dependency`, srcshelton): specific to the
+  7.2.9 round's temporary `cdns3-plat.c`/`cdns3-sky1.c` mainline-cdns3-based
+  USB host workaround. CIX's final `patches-7.3` restored the native
+  split-driver `cdnsp-plat.c`/`cdnsp-sky1.c` model that `0150`-`0162` already
+  target; this patch does not apply to that model and is unneeded.
+- `0090` (rts5453/phy ACPI dependency restoration, meant to offset content
+  that 7.2.9 had to drop): fully redundant here — `0160`
+  (`soc-cix-add-cix-sky1-usb-kconfig-umbrella.patch`) already contains the
+  equivalent `select I2C_SMBUS` / `depends on USB_ROLE_SWITCH` / `depends on
+  ACPI || OF` wiring.
+- `0092` (`drm-panthor-sky1-power-on-via-raw-smc-scmi`, ncz-os): superseded —
+  CIX's own vendor `patches-7.3` (`00111`-`00116`) already natively implements
+  `sky1_gpu_power_on()`/`sky1_hw_power_on()`/`sky1_resets_init()` in
+  `panthor_sky1.c`/`.h`, fully wired into `panthor_device.c`.
+- `0105` (drm display-stack atomic-API port): superseded — CIX's vendor 7.3
+  patches already port the display stack to the modern atomic API; applying
+  this against the 7.3 baseline reports nearly every hunk already applied.
+
+### Why these replaced the originals (7.2.9 context, retained for history)
+
+- `0003` (SCMI ACPI) failed 12 of 44 hunks on 7.2.9; ncz's version is a clean
+  forward-port that also documents and preserves the fwnode reference-counting
+  that a naive hand-rebase loses. (Not applicable to `files/7.3`: CIX's vendor
+  `patches-7.3` already ships SCMI ACPI support natively.)
+- `0008`/`0041` (pmdomain) failed on 7.2.9; ncz's versions add the `if (np)`
+  guards around 7.2's `of_genpd_add_child_ids()`/`of_genpd_remove_child_ids()`.
+  (Not applicable to `files/7.3` for the same reason.)
+- `0011`/`0038`/`0040`/`0087` (panthor) were superseded by the vendor
+  `00111`-`00116` rework; see `0092` above — the vendor 7.3 patches are now the
+  working form directly, so none of the 7.2.9 panthor patches were carried
+  forward.

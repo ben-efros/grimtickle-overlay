@@ -1,0 +1,104 @@
+From: grimtickle-overlay (local)
+Subject: [PATCH] usb: cdns3: sky1: fix unchecked mode-strap, preset ordering, and clk cleanup in drd_init
+
+Four related defects in cdnsp_sky1_drd_init()/sky1_usb_clk_disable_all(),
+found during pre-trial review of 0150-0162:
+
+1. sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG) returned an int but its
+   result was discarded. A regmap_update_bits() failure here silently left
+   the controller strapped in the wrong USB mode while probe reported
+   success. Check it and fail the same way the other required steps do.
+
+2. axi_base and the mode-strap syscon were being written/updated *before*
+   reset_control_deassert(data->preset) in the original patch, while the
+   surrounding code and the 0153 commit message both document that
+   register access must happen after preset is released (the same pattern
+   already used for the D_XEC_* writes immediately below). Move both
+   calls after the preset-deassert success check, consistent with that
+   documented ordering and with every other register access in this
+   function.
+
+3. The err_assert_preset cleanup path called reset_control_assert(data->preset)
+   without checking its return value, so a cleanup failure during an
+   already-failing probe was silently swallowed. Capture it and log it
+   (without replacing the original error being propagated, since the
+   original failure is still the more relevant one to report).
+
+4. sky1_usb_clk_disable_all() left cix_usb_clks[] populated with disabled
+   clk pointers. A subsequent call to this function (e.g. a retried
+   drd_init() on a role-switch or resume path) would call
+   clk_disable_unprepare() a second time on an already-unprepared clk,
+   which is unsafe. NULL each pointer after disabling it so a repeat call
+   is a safe no-op, matching the existing NULL-out pattern already used
+   in sky1_usb_clk_enable_all()'s own error path.
+
+No functional change to the normal (all-steps-succeed) boot path besides
+the axi_base/mode-strap register writes now happening a few instructions
+later in program order, after preset is confirmed released.
+---
+diff --git a/drivers/usb/cdns3/cdnsp-sky1.c b/drivers/usb/cdns3/cdnsp-sky1.c
+index 111111111111..222222222222 100644
+--- a/drivers/usb/cdns3/cdnsp-sky1.c
++++ b/drivers/usb/cdns3/cdnsp-sky1.c
+@@ -150,8 +150,15 @@
+ 
+ 	dev_info(dev, "---------sky1_usb_clk_disable_all----------\n");
+ 
++	/*
++	 * NULL out each pointer after disabling it so a later retry (e.g. a
++	 * failed drd_init() calling this again, or suspend/resume racing a
++	 * role-switch retry) cannot double-disable an already-unprepared clk.
++	 * clk_disable_unprepare(NULL) is a safe no-op.
++	 */
+ 	for (i = 0; i < CIX_USB_CLK_NUM; i++) {
+ 		clk_disable_unprepare(cix_usb_clks[i]);
++		cix_usb_clks[i] = NULL;
+ 	}
+ };
+ 
+@@ -325,15 +332,26 @@
+ 			"cdnsp_sky1_drd_init: failed to enable clocks: %d\n", ret);
+ 		return ret;
+ 	}
+-	writel(CIX_USB_AXI_WR_CACHE_VALUE, data->axi_base);
+-	sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG);
+-
+ 	ret = reset_control_deassert(data->preset);
+ 	if (ret) {
+ 		dev_err(data->dev,
+ 			"cdnsp_sky1_drd_init: failed to deassert preset: %d\n", ret);
+ 		goto err_disable_clk;
+ 	}
++
++	/*
++	 * axi_base and the mode-strap syscon are only accessible once preset
++	 * is released, so these must come after reset_control_deassert()
++	 * above, not before it.
++	 */
++	writel(CIX_USB_AXI_WR_CACHE_VALUE, data->axi_base);
++	ret = sky1_set_mode_by_id(data->dev, MODE_STRAP_OTG);
++	if (ret) {
++		dev_err(data->dev,
++			"cdnsp_sky1_drd_init: failed to set OTG mode strap: %d\n", ret);
++		goto err_assert_preset;
++	}
++
+ 	if (data->u3_disable) {
+ 		dev_info(data->dev, "[%s:%d]disable u3 port\n", __func__, __LINE__);
+ 		writel(D_XEC_CFG_3XPORT_MODE_VALUE, (void *)(data->device_base)
+@@ -517,7 +535,14 @@
+ 	 * clocks enabled above to leave the device in a fully-quiesced,
+ 	 * known state rather than a partially clocked/programmed one.
+ 	 */
+-	reset_control_assert(data->preset);
++	{
++		int cleanup_ret = reset_control_assert(data->preset);
++
++		if (cleanup_ret)
++			dev_err(data->dev,
++				"cdnsp_sky1_drd_init: failed to reassert preset during cleanup: %d\n",
++				cleanup_ret);
++	}
+ err_disable_clk:
+ 	sky1_usb_clk_disable_all(data->dev);
+ 	return ret;
