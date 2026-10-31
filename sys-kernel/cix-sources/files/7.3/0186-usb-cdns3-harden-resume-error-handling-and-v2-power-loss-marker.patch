@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:25:00 2026 -0700
+Subject: [PATCH] usb: cdns3: harden resume error handling and the V2 power-loss marker
+Source: srcshelton/gentoo-ebuilds (Stuart Shelton <stuart@shelton.me>)
+        sys-kernel/cix-sources/files/7.2.x/60020-usb-cdns3-fix-resume-order-and-v2-marker.patch
+Adopted: grimtickle-overlay 7.3.1-r1; adapted to the vendor cdnsp layout; see NOTICE.md.
+
+Port the remaining applicable parts of srcshelton-ebuilds patch 60020 to
+the CIX vendor (cdnsp) cdns3 layout.
+
+- cdns_resume() discarded the role resume callback's return value;
+  propagate it so a failed recovery is reported to the PM core.
+- After a successful power-loss recovery, re-arm the CDNSP V2 power-loss
+  marker (OTG simulate bit) so the next resume does not mis-detect a
+  power loss. A failed recovery returns early and leaves the marker
+  cleared, keeping the retry visible.
+- Read the marker back in cdns_drd_init() to force the write to
+  complete, matching the resume path.
+- cdnsp_controller_resume() left platform suspend without checking the
+  result, ignored cdns_resume() failures, and returned while the device
+  was still logically in LPM with the platform left un-suspended. Check
+  both results and re-enter platform suspend on failure, powering the
+  PHYs back off only when the failure happened after set_phy_power_on()
+  had succeeded.
+
+Deliberately not repeated: the resume-order half of 60020 is already in
+this tree via 0072 (cdnsp_set_platform_suspend() moved before the
+power-loss check), and the V2 init marker plus the CDNSP branch in
+cdns_power_is_lost() via 0065. Unlike the audited cdns3_phys_* state
+machine in the source patch, vendor cdnsp-plat.c tracks no per-PHY
+powered/initialised flags, so unconditional PHY power-off on every error
+path is unsafe and only the path that actually powered the PHYs is
+rolled back.
+
+Adapted from srcshelton/gentoo-ebuilds
+sys-kernel/cix-sources/files/7.2.x/60020-usb-cdns3-fix-resume-order-and-v2-marker.patch
+(author: Stuart Shelton <stuart@shelton.me>) for the 7.3.1 vendor layout.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ drivers/usb/cdns3/cdnsp-plat.c | 26 ++++++++++++++++++++------
+ drivers/usb/cdns3/core.c | 17 +++++++++++++++--
+ drivers/usb/cdns3/drd.c | 1 +
+ 3 files changed, 36 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/usb/cdns3/cdnsp-plat.c b/drivers/usb/cdns3/cdnsp-plat.c
+index 21c4a31..ecb74c2 100644
+--- a/drivers/usb/cdns3/cdnsp-plat.c
++++ b/drivers/usb/cdns3/cdnsp-plat.c
+@@ -326,32 +326,39 @@ static int cdnsp_controller_suspend(struct device *dev, pm_message_t msg)
+ static int cdnsp_controller_resume(struct device *dev, pm_message_t msg)
+ {
+ 	struct cdns *cdns = dev_get_drvdata(dev);
+-	int ret;
++	int ret, rollback_ret;
+ 	unsigned long flags;
+ 
+ 	if (!cdns->in_lpm)
+ 		return 0;
+ 
+-	cdnsp_set_platform_suspend(cdns->dev, false, false);
++	/* Leave platform suspend before accessing the power-loss marker. */
++	ret = cdnsp_set_platform_suspend(cdns->dev, false, false);
++	if (ret)
++		goto err_enter_low_power;
+ 
+ 	if (cdns_power_is_lost(cdns)) {
+ 		phy_exit(cdns->usb2_phy);
+ 		ret = phy_init(cdns->usb2_phy);
+ 		if (ret)
+-			return ret;
++			goto err_enter_low_power;
+ 
+ 		phy_exit(cdns->usb3_phy);
+ 		ret = phy_init(cdns->usb3_phy);
+ 		if (ret)
+-			return ret;
++			goto err_enter_low_power;
+ 	}
+ 
+ 	ret = set_phy_power_on(cdns);
+ 	if (ret)
+-		return ret;
++		goto err_enter_low_power;
+ 
+ 	/* cdns_resume() may sleep; do not invoke it under cdns->lock. */
+-	cdns_resume(cdns);
++	ret = cdns_resume(cdns);
++	if (ret) {
++		set_phy_power_off(cdns);
++		goto err_enter_low_power;
++	}
+ 
+ 	spin_lock_irqsave(&cdns->lock, flags);
+ 	cdns->in_lpm = false;
+@@ -363,6 +370,13 @@ static int cdnsp_controller_resume(struct device *dev, pm_message_t msg)
+ 	}
+ 	dev_dbg(cdns->dev, "%s ends\n", __func__);
+ 
++	return 0;
++
++err_enter_low_power:
++	rollback_ret = cdnsp_set_platform_suspend(cdns->dev, true, false);
++	if (rollback_ret)
++		dev_err(dev, "failed to restore platform suspend: %d\n",
++			rollback_ret);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/usb/cdns3/core.c b/drivers/usb/cdns3/core.c
+index a11b113..d39b743 100644
+--- a/drivers/usb/cdns3/core.c
++++ b/drivers/usb/cdns3/core.c
+@@ -566,8 +566,21 @@ int cdns_resume(struct cdns *cdns)
+ 		}
+ 	}
+ 
+-	if (!role_changed && cdns->roles[cdns->role]->resume)
+-		cdns->roles[cdns->role]->resume(cdns, power_lost);
++	if (!role_changed && cdns->roles[cdns->role]->resume) {
++		ret = cdns->roles[cdns->role]->resume(cdns, power_lost);
++		if (ret)
++			return ret;
++	}
++
++	/*
++	 * Re-arm the power-loss marker only after the recovery above
++	 * succeeded.  A failed recovery returns early, leaving the marker
++	 * cleared so the next resume attempt retries the full recovery.
++	 */
++	if (power_lost && cdns->version == CDNSP_CONTROLLER_V2) {
++		writel(1, &cdns->otg_cdnsp_regs->simulate);
++		readl(&cdns->otg_cdnsp_regs->simulate);
++	}
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/cdns3/drd.c b/drivers/usb/cdns3/drd.c
+index a065d99..64a05d7 100644
+--- a/drivers/usb/cdns3/drd.c
++++ b/drivers/usb/cdns3/drd.c
+@@ -497,6 +497,7 @@ int cdns_drd_init(struct cdns *cdns)
+ 					      &cdns->otg_cdnsp_regs->ien;
+ 			cdns->version  = CDNSP_CONTROLLER_V2;
+ 			writel(1, &cdns->otg_cdnsp_regs->simulate);
++			readl(&cdns->otg_cdnsp_regs->simulate);
+ 		} else if (OTG_CDNS3_CHECK_DID(state)) {
+ 			cdns->otg_irq_regs = (struct cdns_otg_irq_regs __iomem *)
+ 					      &cdns->otg_v1_regs->ien;

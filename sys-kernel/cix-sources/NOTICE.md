@@ -82,6 +82,13 @@ Canonical repository: <https://gitlab.com/ncz-os/meta-cix>.
 | `0173-clocksource-sky1-defer-on-missing-timer-clocks.patch` | `0101` | `…/patches-7.2/0166-clocksource-sky1-defer-on-missing-timer-clocks.patch` |
 | `0175-clk-cix-remap-clkt-bridge-on-scmi-clocks-bind.patch` | `0104` | adapted from `…/patches-7.2/0168-clk-cix-sky1-remap-clkt-bridge-on-scmi-clocks-bind.patch` (simplified: no mapped_list dedup); hunk 1 context regenerated for the 7.3 baseline's extra `#include <dt-bindings/clock/cix,sky1.h>` line |
 
+The ncz 7.3-rc7 BSP also carries the MS-R1 DP AUX-wedge recovery inline in its
+port patch rather than as a numbered patch. It is adopted separately here:
+
+| Overlay patch (7.3) | 7.2.9 patch | Source |
+|---|---|---|
+| `0187-drm-cix-dptx-recover-wedged-aux-engine.patch` | none | `linux-cix-sky1-ncz-7.3-rc7/sky1-ncz-v7.3-rc7-port.patch`, `drivers/gpu/drm/cix/dptx/trilin_dptx.c` (`trilin_dp_aux_recover_max`, `trilin_dp_aux_engine_busy()`, `trilin_dp_aux_engine_reinit()`, retry in `trilin_dp_aux_transfer()`, recovery in `trilin_dp_core_on()`); adapted to this overlay's 26q2-based driver and its HPD/iter AUX loop. The ncz 2 ms busy-drain poll in `trilin_dp_aux_cmd_submit()` is intentionally not taken — the transfer-level retry already rides out a draining engine without lengthening the `aux->hw_mutex` hold. |
+
 ### srcshelton / gentoo-ebuilds
 
 A sibling Gentoo overlay. Repository: <https://github.com/srcshelton/gentoo-ebuilds>.
@@ -151,3 +158,35 @@ kernel.
 The Armbian-derived patches are GPL-2.0 (kernel); see
 `audit/08-armbian-patch-evaluation.md` for the evaluation and the
 rationale for taking only the noted halves.
+
+## cix-sources-7.3.1-r1 — srcshelton USB PM/PHY fixes (0185-0186)
+
+Hand re-targets of two of the three USB fixes in srcshelton/gentoo-ebuilds'
+7.2.x USB PM/PHY series. The source patches were written against that
+overlay's audited `cdns3_phys_*` refactor of mainline `cdns3-plat.c`; this
+tree instead ships CIX's native split vendor driver
+(`cdnsp-plat.c`/`cdnsp-sky1.c`), so the fixes were mapped onto the
+corresponding vendor functions rather than applied verbatim.
+
+| Overlay patch (7.3) | 7.2.x source |
+|---|---|
+| `0185-usb-cdns3-propagate-phy-mode-and-role-activation-errors.patch` | `60040-usb-cdns3-propagate-phy-mode-errors.patch` |
+| `0186-usb-cdns3-harden-resume-error-handling-and-v2-power-loss-marker.patch` | `60020-usb-cdns3-fix-resume-order-and-v2-marker.patch` (remaining deltas only) |
+
+Source patches authored by Stuart Shelton <stuart@shelton.me>
+(<https://github.com/srcshelton/gentoo-ebuilds>, `origin/master`, 2026-10-24);
+GPL-2.0.
+
+- `60030-usb-cdns3-retain-phy-ownership-on-unwind-failure.patch` is **not**
+  carried forward and has no equivalent fix here: it edits the audited
+  `cdns3_phys_init()`/`cdns3_phys_power_on()` helpers and their
+  `usb2_phy_initialized`/`usb2_phy_powered` bookkeeping, none of which exist
+  in the vendor driver. Vendor `cdnsp-plat.c` initialises both PHYs
+  unconditionally in probe with balanced `err_phy3_init`/`err_phy_power_on`
+  labels, so the partial-acquisition refcount imbalance the patch addresses
+  cannot occur in this layout.
+- `60020`'s resume-ordering half is already present in this tree via `0072`
+  (`cdnsp_set_platform_suspend()` moved before the power-loss check), and its
+  `CDNSP_CONTROLLER_V2` power-loss branch and V2 init marker via `0065`;
+  only the still-missing deltas (resume return propagation, V2 marker
+  re-arm, platform-suspend rollback) are carried in `0186`.

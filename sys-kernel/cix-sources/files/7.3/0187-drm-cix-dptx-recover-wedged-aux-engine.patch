@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 12:40:00 2026 -0700
+Subject: [PATCH] drm: cix: dptx: recover a wedged AUX engine on -EBUSY
+
+The Cadence AUXHPD block latches REQUEST_IN_PROGRESS/REPLY_IN_PROGRESS
+when an AUX transaction is aborted (e.g. by a disable->enable cycle
+during the greeter/compositor handoff). While those bits are latched,
+trilin_dp_aux_cmd_submit() returns -EBUSY for every transfer and the
+link stays unusable until the block is reset -- but the reset only runs
+in the PHY prepare path. A stream-only trilin_dp_disable() never
+core_off()s, so trilin_dp_core_on() short-circuits on DPTX_STATE_READY
+and the engine remains wedged. This is the MS-R1 cold-boot black screen
+and the ~43 s greeter stall: DPCD/EDID reads fail ("read dcpd caps
+failed"), no link training happens, and the compositor's modeset blocks
+until it gives up.
+
+Port the bounded recovery from the ncz-os 7.3-rc7 port:
+
+- add an aux_recover_max module parameter (default 2);
+- add trilin_dp_aux_engine_busy() and trilin_dp_aux_engine_reinit();
+  the latter invalidates the cached PHY state before calling
+  reset_dp_and_reinit() so phy_ops->prepare() really re-runs and resets
+  AUXHPD even on platforms without a phy_reset control;
+- in trilin_dp_aux_transfer(), keep retrying transient submit failures
+  (not just -EBUSY) and, once the retry budget is spent with -EBUSY,
+  re-init the engine and retry the whole message, up to
+  aux_recover_max times;
+- in the DPTX_STATE_READY fast path of trilin_dp_core_on(), recover a
+  busy engine before returning.
+
+Adapted to this tree's trilin_dp_aux_transfer(): it has an outer
+HPD/iter loop that the ncz base lacks. The recovery loop wraps that
+loop, a submit failure no longer jumps straight to err (the -EBUSY
+recovery decision needs the error code), and the HPD-disconnect check
+keeps its original goto err semantics.
+
+Source: ncz-os/meta-cix (Jason Perlow <jperlow@gmail.com>)
+        linux-cix-sky1-ncz-7.3-rc7/sky1-ncz-v7.3-rc7-port.patch
+        (drivers/gpu/drm/cix/dptx/trilin_dptx.c), adapted for the
+        CIX 26q2-based driver in this overlay.
+Adopted: grimtickle-overlay 7.3.1; see NOTICE.md.
+
+Not ported from the ncz version: the 2 ms status-poll drain wait it
+adds to trilin_dp_aux_cmd_submit() before returning -EBUSY -- this
+tree's transfer-level retry already rides out a merely-draining engine
+without an extra blocking delay under aux->hw_mutex.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ 0187-drm-cix-dptx-recover-wedged-aux-engine.patch | 153 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++--------------------------
+ 1 file changed, 127 insertions(+), 26 deletions(-)
+
+--- a/drivers/gpu/drm/cix/dptx/trilin_dptx.c
++++ b/drivers/gpu/drm/cix/dptx/trilin_dptx.c
+@@ -61,6 +61,10 @@
+ static uint trilin_dp_aux_timeout_ms = 50;
+ module_param_named(aux_timeout_ms, trilin_dp_aux_timeout_ms, uint, 0444);
+ MODULE_PARM_DESC(aux_timeout_ms, "DP aux timeout value in msec (default: 50)");
++static uint trilin_dp_aux_recover_max = 2;
++module_param_named(aux_recover_max, trilin_dp_aux_recover_max, uint, 0444);
++MODULE_PARM_DESC(aux_recover_max,
++		 "Max AUX-engine re-inits per transfer before giving up (default: 2)");
+ 
+ /*
+  * Some sink requires a delay after power on request
+@@ -879,48 +883,132 @@
+ 	return 0;
+ }
+ 
++/* defined below; re-runs the AUXHPD/DP-core reset sequence */
++static int reset_dp_and_reinit(struct trilin_dp *dp);
++
++/*
++ * The Cadence AUXHPD block latches REQUEST_IN_PROGRESS/REPLY_IN_PROGRESS when
++ * a transaction is aborted (e.g. a disable->enable cycle during the
++ * greeter/compositor handoff). While latched, trilin_dp_aux_cmd_submit()
++ * returns -EBUSY for every transfer and the link looks dead until the block is
++ * reset -- and the block reset only runs in the PHY prepare path.
++ */
++static bool trilin_dp_aux_engine_busy(struct trilin_dp *dp)
++{
++	u32 reg = trilin_dp_read(dp, TRILIN_DPTX_AUX_STATUS);
++
++	return !!(reg & (TRILIN_DPTX_AUX_STATUS_REQUEST_IN_PROGRESS |
++			 TRILIN_DPTX_AUX_STATUS_REPLY_IN_PROGRESS));
++}
++
++/*
++ * Force the AUXHPD/DP-core reset sequence to actually re-prepare the PHY.
++ * reset_dp_and_reinit() re-runs phy_ops->prepare() (which resets AUXHPD), but
++ * prepare() is a no-op while the cached PHY state says "already prepared", and
++ * reset_dp_and_reinit() only clears that cache when it owns a phy_reset
++ * control. Invalidate the cache here so the recovery is never silently a
++ * no-op on a platform whose phy_reset is absent.
++ *
++ * Safe from inside trilin_dp_aux_transfer() (which holds aux->hw_mutex) and
++ * from trilin_dp_core_on() (called under session_lock): the sequence takes no
++ * aux mutex and performs no drm_dp_dpcd_* access, so it cannot re-enter
++ * trilin_dp_aux_transfer(). It touches MMIO/reset controls only, and both
++ * callers run with the device already runtime-active in an AUX/modeset.
++ */
++static int trilin_dp_aux_engine_reinit(struct trilin_dp *dp)
++{
++	dp->phy.state = trilin_phy_power_off;
++	return reset_dp_and_reinit(dp);
++}
++
+ static ssize_t trilin_dp_aux_transfer(struct drm_dp_aux *aux,
+ 				      struct drm_dp_aux_msg *msg)
+ {
+ 	struct trilin_dp *dp = container_of(aux, struct trilin_dp, aux);
+-	int ret;
+-	unsigned int i, iter;
+-	size_t to_access, accessed_bytes;
++	int ret = 0;
++	unsigned int i, iter, recover;
++	size_t to_access = 0, accessed_bytes = 0;
+ 
+ 	/* Number of loops = timeout in msec / aux delay (400 usec) */
+ 	iter = trilin_dp_aux_timeout_ms * 1000 / 400;
+ 	iter = iter ? iter : 1;
+ 
+-	for (i = 0; i < iter; i++) {
+-		to_access = 0;
+-		accessed_bytes = 0;
+-
+-		/* after sleep, maybe dp is disconnected, so check again */
+-		if (!trilin_dp_get_hpd_state(dp))
+-			goto err;
+-		do {
+-			to_access = min_t(size_t, DP_AUX_MAX_PAYLOAD_BYTES,
+-					  msg->size - accessed_bytes);
++	/*
++	 * The Cadence AUXHPD block can be left with
++	 * REQUEST_IN_PROGRESS/REPLY_IN_PROGRESS latched after an aborted or
++	 * disabled transaction. Every subsequent transfer then fails -EBUSY
++	 * until the block is reset -- the block reset lives in the PHY
++	 * prepare path, so force it by re-running the DP-core/PHY reset
++	 * sequence and retry, instead of returning a failed DPCD/EDID read
++	 * that stalls the compositor's modeset for tens of seconds (the
++	 * MS-R1 cold-boot black screen). Bounded by aux_recover_max so a
++	 * truly dead sink still fails fast.
++	 */
++	for (recover = 0; recover <= trilin_dp_aux_recover_max; recover++) {
++		for (i = 0; i < iter; i++) {
++			to_access = 0;
++			accessed_bytes = 0;
+ 
+-			ret = trilin_dp_aux_cmd_submit(
+-				dp, msg->request, msg->address + accessed_bytes,
+-				msg->buffer + accessed_bytes, to_access,
+-				&msg->reply);
+-			if (ret && printk_ratelimit()) {
+-				DP_ERR("failed to do aux transfer (%d)\n", ret);
++			/* after sleep, maybe dp is disconnected, so check again */
++			if (!trilin_dp_get_hpd_state(dp))
+ 				goto err;
+-			}
+ 
+-			accessed_bytes += to_access;
+-		} while (accessed_bytes < msg->size);
++			ret = 0;
++			do {
++				to_access = min_t(size_t,
++						  DP_AUX_MAX_PAYLOAD_BYTES,
++						  msg->size - accessed_bytes);
++
++				ret = trilin_dp_aux_cmd_submit(
++					dp, msg->request,
++					msg->address + accessed_bytes,
++					msg->buffer + accessed_bytes, to_access,
++					&msg->reply);
++				/*
++				 * A transient AUX error (-EBUSY engine not yet
++				 * drained, -ETIMEDOUT no reply yet, -EIO short
++				 * read) must not abort the whole transfer: the
++				 * loops below back off and re-submit the
++				 * message. Keep @ret so the -EBUSY recovery
++				 * decision can act on it.
++				 */
++				if (ret)
++					break;
++
++				accessed_bytes += to_access;
++			} while (accessed_bytes < msg->size);
+ 
+-		if (accessed_bytes == msg->size)
++			if (!ret && accessed_bytes == msg->size)
++				break;
++
++			/* transient failure: back off (~400us) and retry */
++			usleep_range(400, 500);
++		}
++
++		if (!ret && accessed_bytes == msg->size)
+ 			break;
+ 
+-		usleep_range(400, 500);
++		/* hard error other than a wedged engine: no point resetting */
++		if (ret != -EBUSY)
++			break;
++		/* recovery budget spent: report the failure and let caller decide */
++		if (recover == trilin_dp_aux_recover_max)
++			break;
++		/* re-init the AUX/PHY; if that fails there is nothing left to try */
++		if (trilin_dp_aux_engine_reinit(dp))
++			break;
++		DP_WARN("AUX engine wedged (EBUSY); reset AUX/PHY, retry %u\n",
++			recover + 1);
+ 	}
+ 
+-	dev_dbg(dp->dev, "aux done after %d retry\n", i);
++	if (ret) {
++		if (printk_ratelimit())
++			DP_ERR("failed to do aux transfer (%d) after %u retries\n",
++			       ret, i);
++		goto err;
++	}
++
++	dev_dbg(dp->dev, "aux done after %u retry\n", i);
+ 	return msg->size;
+ err:
+ 	if (accessed_bytes > to_access)
+@@ -2129,8 +2217,21 @@
+ 
+ 	DP_DEBUG("enter");
+ 	if (dp->state & DPTX_STATE_READY) {
++		int err = 0;
++
+ 		DP_DEBUG("[already ready]");
+-		return rc;
++		/*
++		 * A stream-only disable (trilin_dp_disable) does not
++		 * core_off(), so the DPTX stays READY and this path skips the
++		 * PHY re-init entirely. If the AUX engine was left wedged by a
++		 * disable->enable cycle, no later core_on would ever clear it --
++		 * exactly the MS-R1 cold-boot black screen and ~43 s greeter
++		 * stall. Recover the engine here so the modeset that follows
++		 * can read DPCD/EDID again.
++		 */
++		if (trilin_dp_aux_engine_busy(dp))
++			err = trilin_dp_aux_engine_reinit(dp);
++		return err;
+ 	}
+ 
+ 	dp->state |= DPTX_STATE_READY;
