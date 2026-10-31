@@ -26,6 +26,9 @@ pkg_postinst() {
 	kernel-2_pkg_postinst
 	einfo "For more info on this patchset, and how to report problems, see:"
 	einfo "${HOMEPAGE}"
+	ewarn "MS-R1 / CIX Sky1 config: set '# CONFIG_RT_GROUP_SCHED is not set'."
+	ewarn "With RT_GROUP_SCHED=y under cgroup-v2, rtkit/PipeWire cannot get"
+	ewarn "SCHED_RR and audio XRUNs under load. See docs/config-notes.md."
 }
 
 pkg_postrm() {
