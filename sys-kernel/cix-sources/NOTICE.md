@@ -206,3 +206,9 @@ GPL-2.0.
   `CDNSP_CONTROLLER_V2` power-loss branch and V2 init marker via `0065`;
   only the still-missing deltas (resume return propagation, V2 marker
   re-arm, platform-suspend rollback) are carried in `0186`.
+
+## cix-sources-7.3.1-r1 — USB SSP opt-in test switch
+
+| Overlay patch | Origin |
+|---|---|
+| `0190-usb-cdns3-sky1-make-ssp-enable-opt-in.patch` | local (see `audit/10-usb-controller-and-10gbps-analysis.md`); adds only a `cix_usb_ssp_enable` boot parameter, default preserves the vendor 5 Gbps cap |

@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Date: Sat Oct 31 14:20:00 2026 -0700
+Subject: [PATCH] usb: cdns3: sky1: make SuperSpeedPlus an opt-in boot parameter
+
+SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) has been force-disabled in
+cdnsp_sky1_probe() since the 7.1 series because sustained 10Gbps I/O on
+the MS-R1 CDNSP/cix-usbdp-phy stack produced periodic device resets.
+That workaround is still the safe default.
+
+Add a core boot parameter, "cix_usb_ssp_enable", defaulting to 0.  When
+set, the forced disable is skipped and the firmware/XEC configuration
+keeps bit 31 of XEC_CFG_3XPORT_MODE set, allowing the host controllers
+to train at SuperSpeedPlus.  The ACPI "ssp-disable" property remains
+authoritative: firmware that sets it still forces 5Gbps.
+
+This provides a low-risk test switch for validating 10Gbps operation
+without changing the default behaviour of any existing system.
+
+Signed-off-by: grimtickle-overlay <overlay@localhost>
+---
+ drivers/usb/cdns3/cdnsp-sky1.c | 31 +++++++++++++++++++++----------
+ 1 file changed, 21 insertions(+), 10 deletions(-)
+
+--- a/drivers/usb/cdns3/cdnsp-sky1.c
++++ b/drivers/usb/cdns3/cdnsp-sky1.c
+@@ -25,6 +25,18 @@
+ #include <linux/device.h>
+ #include <linux/property.h>
+ #include <linux/soc/cix/cix-acpi-resource-lookup.h>
++
++/*
++ * SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) is opt-in.
++ *
++ * The vendor default (and this overlay's safe default) caps every CIX
++ * CDNSP-Sky1 SSP host port at Gen1/5Gbps because sustained 10Gbps I/O on
++ * the MS-R1's CDNSP/cix-usbdp-phy stack has historically produced periodic
++ * device resets.  Pass "cix_usb_ssp_enable=1" on the kernel command line
++ * to allow SSP for controlled testing; the default stays 5Gbps.
++ */
++static bool cix_usb_ssp_enable;
++core_param(cix_usb_ssp_enable, cix_usb_ssp_enable, bool, 0444);
+ 
+ #include "core.h"
+ #include "../host/xhci.h"
+@@ -752,17 +764,16 @@
+ 	data->ssp_disable = device_property_read_bool(dev, "ssp-disable");
+ 
+ 	/*
+-	 * Force SuperSpeedPlus (10Gbps) off unconditionally, regardless of
+-	 * the "ssp-disable" ACPI property. Sustained 10Gbps I/O on the
+-	 * MS-R1's cdnsp-sky1/cix-usbdp-phy stack remained unreliable
+-	 * (periodic device resets under load) even after the full PHY
+-	 * reset-sequencing, ACPI resource-lookup, and RTS5453 ARA hardening
+-	 * done in the preceding patches. Capping at Gen1/5Gbps is a
+-	 * pragmatic stability workaround, not a confirmed root-cause fix -
+-	 * see the accompanying note files for suspected causes still under
+-	 * investigation.
++	 * Keep the vendor's stable Gen1/5Gbps cap unless explicitly opted
++	 * out of on the command line.  "ssp-disable" from firmware still
++	 * forces the cap off (i.e. SSP disabled) even when the parameter is
++	 * set.
+ 	 */
+-	data->ssp_disable = true;
++	if (!cix_usb_ssp_enable)
++		data->ssp_disable = true;
++	else
++		dev_warn(dev,
++			 "cix_usb_ssp_enable=1: SuperSpeedPlus enabled experimentally; 10Gbps stability is not validated\n");
+ 
+ 	if (!device_property_read_u32(dev, "sof_clk_freq", &ret))
+ 		data->sof_clk_freq = ret;

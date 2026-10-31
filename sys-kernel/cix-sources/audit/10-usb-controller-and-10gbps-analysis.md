@@ -160,38 +160,74 @@ For USB-NVMe bridges (ASM2362/RTL9210-class), 10 Gbps gives the full
 
 ## 5. Proposed path to 10 Gbps
 
-This round produced analysis only; no USB build/behaviour changes were
-made, because the reference MS-R1 is an active Ceph node and the 10 Gbps
-mode itself is the known-unstable path.
+The opt-in kernel switch is implemented as
+`0190-usb-cdns3-sky1-make-ssp-enable-opt-in.patch` (see §5.1); no live
+test has been run on the reference MS-R1 yet.  The USB-SATA enclosure is
+production Ceph storage (see §5.5), so enabling SSP on the live SUB0 port
+would re-enumerate seven OSD disks and must not be done outside a
+maintenance window.  A separate 10 G device on an unused port is the
+preferred first test, but no spare device was available.
 
-### 5.1 Kernel: make SSP opt-in, default stable
+### 5.1 Kernel: SSP opt-in boot parameter (implemented)
 
-Replace the unconditional override with a boot/module parameter so SSP
-can be enabled for testing and left off by default until validated:
+`0190` replaces the unconditional `data->ssp_disable = true;` with a
+`core_param`, so the default remains exactly the vendor-stable 5 Gbps
+behaviour:
 
 ```c
-/* cdnsp-sky1.c, sketch only */
 static bool cix_usb_ssp_enable;
-module_param_named(cix_usb_ssp_enable, cix_usb_ssp_enable, bool, 0444);
-MODULE_PARM_DESC(cix_usb_ssp_enable, "Allow SuperSpeedPlus on CIX USBSSP ports");
+core_param(cix_usb_ssp_enable, cix_usb_ssp_enable, bool, 0444);
 
 ...
 data->ssp_disable = device_property_read_bool(dev, "ssp-disable");
 if (!cix_usb_ssp_enable)
         data->ssp_disable = true;   /* keep current safe default */
+else
+        dev_warn(dev, "cix_usb_ssp_enable=1: SuperSpeedPlus enabled experimentally...\n");
 ```
 
 `XEC_CFG_3XPORT_MODE` then keeps bit 31 set and the host can train SSP.
-A per-controller allow-list (id 0-5 only) is preferable to all-or-nothing
-for the first tests. Do the same review for the device-side
-`D_XEC_CFG_3XPORT_MODE` write if peripheral mode is ever needed; the
-current plan is host-mode only.
+Pass `cix_usb_ssp_enable=1` on the kernel command line for the
+experiment; normal boots keep the 5 Gbps cap.  The parameter applies to
+all six SSP `SUB` controllers (the four USB2-only `HUB` controllers do
+not use this bit), so the first test should be done with the Ceph
+enclosure unplugged/unbound and a non-production device on one port.
+Per-controller allow-listing is a possible follow-up if whole-controller
+granularity is too broad.  The device-side `D_XEC_CFG_3XPORT_MODE` write
+is separate and unchanged; the target use case is host mode.
 
-Because the parameter is built-in (`CONFIG_USB_CDNSP_SKY1=y`), pass
-`cix_usb_ssp_enable=1` on the kernel command line for the experiment; no
-feature is enabled on a normal boot.
+### 5.2 USB controller fixes since 7.1.5
 
-### 5.2 Test sequence (single maintenance window)
+The 7.1.5 kernel already contained the SSP cap (`0086`).  Since then the
+overlay picked up these USB-controller-side changes (7.2.9 and 7.3.1
+lineages):
+
+| Area | Change | Relevance to 10G |
+|---|---|---|
+| Vendor USB baseline | CIX `patches-7.3` resync: new `0024`/`0025`/`0026`/`0027`, reworked `0065` CDNSP timeout/resume, `0061`/`0062` shutdown/power-off SError fixes, `0068` PHY dependency, `0072` OPI STR USB timeout, `0054` Type-C hotplug | Newer CDNSP/PHY code; does **not** remove the SSP cap |
+| PHY hardening | `0150` ref-clk/required-resource fixes, `0151` reset assert checks, `0158` init-count underflow, `0159` PLL polling (deferred) | Robustness; no SSP enable |
+| DRD/probe hardening | `0153` reset sequencing/ACPI defer, `0157` ACPI OTG detection, `0176` mode-strap/preset ordering/clk cleanup | Startup-stability improvements that may reduce the reset windows seen at 10G, but no root-cause fix |
+| Type-C/PD | `0154` rts5453 ERR_PTR/log noise, `0155` role-reset failure propagation, `0156` ARA shared-IRQ | Host/role reliability; not link-speed related |
+| PM/resume | `0185` PHY mode/role error propagation, `0186` resume error handling + V2 power-loss marker (srcshelton) | Resume/role failure paths; may help stability testing |
+| Deferred | `usb-host-xhci-plat-acpi-lpm-autodetect.patch.deferred` (LPM/U1/U2), `phy-cix-usbdp-pll-ready...deferred` | LPM is a plausible SSP-stability factor; not currently applied |
+| Kernel baseline | Linux 7.1 → 7.3 USB core/xHCI/hub fixes from the kernel bump | Not itemized; the 7.3.1 tree is newer in all USB subsystems |
+
+Net: there are many fixes since 7.1.5, but none is documented as fixing
+the 10 Gbps instability; `0162` deliberately keeps the 5 Gbps cap.  The
+new opt-in parameter makes the experiment possible without changing the
+default.
+
+### 5.3 Risk on the reference board
+
+The 7 USB-SATA disks are **production Ceph OSD block/db devices**:
+`osd.6` (`sde`), `osd.13` (`sda`), `osd.18` (`sdg`), `osd.30` (`sdc`),
+`osd.33` (`sdb`), `osd.41` (`sdd`), `osd.100` (`sdf`), with the OSD
+daemons running on the node. Enabling SSP on SUB0 and forcing a port
+re-enumeration resets all seven disks and can flap those OSDs. Use a
+spare device on an unused 10 G port, or take the OSDs down in a
+maintenance window.
+
+### 5.4 Test sequence (single maintenance window)
 
 1. Boot the patched kernel with `cix_usb_ssp_enable=1` via one-time
    UEFI `BootNext` (same procedure as doc 07), leaving the production
@@ -212,7 +248,7 @@ feature is enabled on a normal boot.
    devices`, xHCI port registers if available, and the exact workload;
    fall back to 5 G and bisect the cause.
 
-### 5.3 Suspected causes to investigate if 10 G is still unstable
+### 5.5 Suspected causes to investigate if 10 G is still unstable
 
 The vendor workaround notes did not identify a root cause. Candidates,
 in rough order of likelihood/value:
@@ -237,7 +273,7 @@ in rough order of likelihood/value:
    (RTS5453) state can affect the SuperSpeed lanes; test both cable
    orientations and a Type-A port.
 
-### 5.4 Hardware recommendations
+### 5.6 Hardware recommendations
 
 * Use a USB 3.2 Gen2 (10 Gbps) certified cable for the first link; the
   current enclosure's cable is unknown and the current 5 G result is
@@ -268,3 +304,43 @@ in rough order of likelihood/value:
 * Vendor/overlay SSP workaround: `files/7.3/0162-usb-cdns3-sky1-force-disable-superspeedplus.patch`,
   `files/7.1/0086-usb-cdns3-sky1-force-disable-superspeedplus.patch`; prior
   audit `01-vendor-coverage.md` G1.
+
+### 5.7 Prepared test kernel (built, not installed)
+
+A test kernel with `0190` applied was built locally (out-of-tree arm64
+cross build: clang/LLVM, `-j44`) against the full current 7.3.1 patch
+set, with `CONFIG_LOCALVERSION="-cix-ssp"`.  The build completed with
+`BUILD_EXIT=0`; `cdnsp-sky1.o` compiles cleanly and the boot parameter is
+present in `System.map` (`__param_str_cix_usb_ssp_enable`).  Only the
+pre-existing vendor section-mismatch/modpost warnings remain.
+
+Artifacts (local, gitignored):
+
+- `.review-7.3/artifacts/7.3.1-cix-ssp/Image`
+- `.review-7.3/artifacts/7.3.1-cix-ssp/vmlinux`, `System.map`, `.config`
+- `.review-7.3/artifacts/7.3.1-cix-ssp/modstage/lib/modules/7.3.1-cix-ssp/`
+
+The test kernel has **not** been installed to `/boot`, and no EFI
+`BootNext` entry was set.
+
+The artifact set is also staged on the MS-R1 under
+`/root/cix-7.3.1-ssp/` (`Image`, `System.map`, `config`,
+`modules-7.3.1-cix-ssp.tar.gz`, `README.txt`) without touching
+`/boot`, `/lib/modules`, `BootOrder`, or `BootNext`.  The staged Image
+SHA-256 is
+`312ad17e4eef7b539e6ee6ee3615eee2110cfefcb8e686160823fcda41183c8f`.
+  When a test window is chosen, the expected
+procedure is:
+
+1. Copy the staged modules to `/lib/modules/7.3.1-cix-ssp`, run
+   `depmod 7.3.1-cix-ssp`.
+2. Install the image as a UKI (`installkernel`/`kernel-bootcfg` or the
+   usual `make install` path) with the test cmdline including
+   `cix_usb_ssp_enable=1`.
+3. Set the new entry as a **one-time** UEFI `BootNext` only
+   (`kernel-bootcfg --once` or `efibootmgr -n`), leaving `BootOrder`
+   unchanged.
+4. Confirm `dmesg | grep 'SSP disabled'` shows no disable for `SUB0`
+   (or the tested port), then attach a non-production 10 G device to an
+   unused port first; do not use the Ceph enclosure outside maintenance.
+5. Revert with one more one-time `BootNext` to the 7.1.5 entry.
