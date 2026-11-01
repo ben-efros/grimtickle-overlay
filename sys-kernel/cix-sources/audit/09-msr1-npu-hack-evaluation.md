@@ -119,3 +119,58 @@ patch and SSDT source respectively). If adopted, record it in
 repository, preserving the hack author's attribution. The `.aml`/`.deb`
 artifacts must not be redistributed from the overlay; rebuild them from
 source.
+
+## Update 2026-11-01 — NPU brought up on 7.3.1-cix-ssp
+
+Implementation status on the reference MS-R1:
+
+* **KMD: operational.** Built `aipu.ko` from
+  `cix_opensource__npu_driver` `p1_7.0_v6.2.0` against the local
+  7.3.1 tree (LLVM cross-build, no source changes needed for the base
+  module).  With the MS-R1 ABI patch it probes:
+
+  ```
+  armchina CIXH4000:00: sky1_npu_probe: NPU core num is 3
+  armchina CIXH4000:00: AIPU detected: zhouyi-v3
+  # Enabled Partition Count: 1 / Core Count per Cluster: 3
+  ```
+
+  `/dev/aipu` exists, and a small `AIPU_IOCTL_QUERY_CAP` program reports
+  `partition_cnt=1 asid_cnt=4 clusters=1 cores=3 tecs=4`.
+
+* **UMD: operational for context/graph.**  Downloaded the public CIX
+  NPU SDK 25Q3 (`cix_noe_sdk_25_q3_release`), installed its
+  `cix-noe-umd_2.0.2_arm64.deb` payload by hand into
+  `/usr/share/cix/lib` + `/usr/share/cix/include/npu` (Gentoo has no
+  `dpkg`), added `/etc/ld.so.conf.d/cix-noe.conf`, and installed the
+  ABI patch as `sys-kernel/cix-npu-driver/files/msr1/0100-armchina-npu-msr1-v0-abi.patch`.
+  `npu_smoketest` succeeds:
+
+  ```
+  noe_init_context OK
+  target: X2_1204MP3
+  partition_count: 1
+  cluster 0: 3 cores
+  ```
+
+* **Graph load: operational.** Loading the `bge-small-zh-v1.5_256.cix`
+  graph succeeds through UMD; the graph reports 3 inputs (1 KiB each)
+  and 2 outputs (256 KiB + 1 KiB), and `noe_create_job` succeeds.
+
+* **Inference: not yet.** After setting zero-filled inputs,
+  `noe_job_infer_sync` currently returns `0x23`
+  (`NOE_STATUS_ERROR_TIMEOUT`), and UMD free-buffer errors /
+  `V3: invalid PA ...` messages appear during cleanup. This is the
+  next issue to solve; likely candidates are the v0 free-buffer
+  translation, the job/scheduling ABI, or using the newer matched UMD
+  (3.1.4) instead of the SDK's 2.0.2. The KMD/UMD/graph path itself is
+  validated.
+
+Persistence set up on the target: `aipu.ko` in
+`/lib/modules/7.3.1-cix-ssp/updates/`, `modules-load.d/aipu.conf`,
+`ld.so.conf.d/cix-noe.conf`, and `/usr/share/cix/include/npu`.
+The module was not auto-loaded before a reboot test yet.
+
+The ABI patch is currently opt-in for packaging (its ioctl payload
+widening matches UMD 2.0.x, not the newer 3.1.4); do not enable it by
+default without pinning the UMD version.

@@ -212,3 +212,11 @@ GPL-2.0.
 | Overlay patch | Origin |
 |---|---|
 | `0190-usb-cdns3-sky1-make-ssp-enable-opt-in.patch` | local (see `audit/10-usb-controller-and-10gbps-analysis.md`); adds only a `cix_usb_ssp_enable` boot parameter, default preserves the vendor 5 Gbps cap |
+
+## NPU enablement (MS-R1, 7.3.1)
+
+| Item | Origin |
+|---|---|
+| `sys-kernel/cix-npu-driver/files/msr1/0100-armchina-npu-msr1-v0-abi.patch` | derived from `FyrbyAdditive/ms-r1-npu-hack` (GPL-2.0), adapted to the CIX `p1_7.0_v6.2.0` driver source |
+| `cix-noe-umd 2.0.2` | CIX NPU SDK 25Q3, downloaded from `https://dl.radxa.com/orion/common/cix_noe_sdk_25_q3_release.tar.gz`; proprietary vendor userspace, manually installed for validation, not redistributed by the overlay |
+| NPU test programs (`npu_query.c`, `npu_graph_test.c`, `npu_infer_test.c`, `npu_smoketest.c`) | local test utilities; not installed by the package |
