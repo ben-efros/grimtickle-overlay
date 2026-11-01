@@ -380,3 +380,40 @@ tar -C /usr/lib/modules --strip-components=2 -xzf modules-7.3.1-cix-ssp.tar.gz \
 ls -ld /lib      # verify it is still a symlink before rebooting
 depmod 7.3.1-cix-ssp
 ```
+
+### 5.9 First hardware result: SuperSpeedPlus works (2026-11-01)
+
+The opt-in kernel was installed as a one-time `BootNext` entry with
+`cix_usb_ssp_enable=1` and booted on the MS-R1.  All ten `cdnsp-sky1`
+wrappers logged `ssp-disable=0`; there were no `SSP disabled` lines.
+The persistent `BootOrder` was restored unchanged, so the fallback
+entry remains the known-good `7.3.1-cix-review`.
+
+With a **Realtek RTL9210 M.2 NVMe adapter** (`0bda:9210`, Sabrent)
+attached to a Type-C port:
+
+```
+usb 14-1: new SuperSpeed Plus Gen 2x1 USB device number 2
+usb 14-1: ... idVendor=0bda, idProduct=9210
+scsi host0: uas
+sd 0:0:0:0: [sda] 1953525168 512-byte logical blocks
+```
+
+`/sys/bus/usb/devices/14-1/speed` = `10000`, `version` = `3.20`, and
+the link is UAS.  Measured read throughput:
+
+- 4 GiB direct read: **856 MB/s**
+- 16 GiB sustained direct read: 22 s (~745 MB/s)
+
+No xHCI reset, `uas_eh_*`, or `uas_zap_pending` appeared during either
+transfer.  The only noisy event was at initial attach: the Type-C PD
+stack re-registered the partner and the `xhci-hcd.17` host controller
+was removed/re-added once, causing a brief disconnect/re-enumerate;
+it did not recur during I/O and is consistent with Type-C role/PD
+renegotiation rather than a link-training failure.
+
+The USB-SATA enclosure was deliberately **not** tested at 10 Gbps in
+this session: its seven disks are Ceph OSDs and it was kept unplugged.
+The next test should repeat this with the enclosure after the USB-backed
+OSDs are disabled, and then run multi-drive/UAS I/O to see whether the
+original 10 Gbps instability appears.
