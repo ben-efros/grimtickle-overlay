@@ -55,3 +55,9 @@ keeps the 7.2.9 findings for history.
 | # | Report | Scope |
 |---|---|---|
 | 10 | [usb-controller-and-10gbps-analysis](10-usb-controller-and-10gbps-analysis.md) | MS-R1 USB controller/PHY/port topology, current 5 Gbps bottleneck (forced SuperSpeedPlus disable), UAS/BOT state, and the plan to reach 10 Gbps USB-SATA links |
+
+## TPM addendum (2026-11-01)
+
+| # | Report | Scope |
+|---|---|---|
+| 11 | [tpm-npct750-enablement](11-tpm-npct750-enablement.md) | Enabling SPI controllers, pinctrl and TPM ACPI IDs for the Nuvoton NPCT750; result and remaining hardware fault |
