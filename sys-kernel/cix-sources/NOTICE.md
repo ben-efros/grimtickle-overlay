@@ -232,3 +232,10 @@ carrying `compatible="ramoops"`, `record-size`, `console-size` and
 `pmsg-size`; before this patch the driver rejected it as
 `ramoops: NULL platform data` / `probe ... failed with error -22`, leaving no
 persistent crash log.
+
+The validated MS-R1 NPU pairing as of 2026-11-01 is KMD **6.1.1**
+(MS-R1 patched, from `ms-r1-npu-hack`'s DKMS source) with CIX UMD
+**2.0.2** from the public NPU SDK 25Q3.  KMD 6.1.1 source is GPL-2.0;
+UMD 2.0.2 is proprietary CIX userspace and is not redistributed here.
+Inference of `bge-small-zh-v1.5_256.cix` succeeds repeatedly with this
+pairing.

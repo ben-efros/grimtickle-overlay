@@ -174,3 +174,37 @@ The module was not auto-loaded before a reboot test yet.
 The ABI patch is currently opt-in for packaging (its ioctl payload
 widening matches UMD 2.0.x, not the newer 3.1.4); do not enable it by
 default without pinning the UMD version.
+
+### Resolution — use KMD 6.1.1 with UMD 2.0.2
+
+The 6.2.0 KMD + UMD 2.0.2 combination got as far as graph load, but
+`noe_job_infer_sync` timed out (0x23) and the v0 free path logged invalid
+PAs.  The hack's original validated pairing is KMD **6.1.1** + UMD
+**2.0.2**, so the 6.1.1 KMD source from
+`ms-r1-npu-hack/npu-fix/artifacts/cix-npu-driver-dkms_6.1.1-2_all.deb`
+was rebuilt against 7.3.1 and loaded instead.  That combination works:
+
+```
+load: 0x0 graph=4294967296
+tensors in=3 out=2
+ input[0] size=1024 dtype=7
+...
+create_job: 0x0 job=4294967297
+set input[0] (1024 bytes): 0x0
+...
+infer_sync: 0x0
+get output[0] (262144 bytes): 0x0
+get output[1] (1024 bytes): 0x0
+```
+
+Five consecutive runs of the `bge-small-zh-v1.5_256.cix` graph returned
+`infer_sync: 0x0`, with no NPU/IOMMU errors in `dmesg`.  The module
+auto-loads through `/etc/modules-load.d/aipu.conf`, and `/dev/aipu`
+appears after `modprobe`.
+
+**Recommended pairing:** KMD 6.1.1 + CIX UMD 2.0.2 (SDK 25Q3) for the
+MS-R1.  KMD 6.2.0 is only appropriate with the newer UMD 3.1.4, which
+was not available in the public SDK.  The overlay `0100` patch for
+6.2.0 adds the v0 ABI but does not make the 6.2.0 scheduler compatible
+with UMD 2.0.2; a 6.1.1 ebuild/patch (or the newer UMD) is the correct
+packaging path.
