@@ -106,3 +106,44 @@ regression or a stack-specific issue rather than an inherent G720
 limitation.  Possible next steps are to test the ncz Mesa 26.1.3 build
 (or a Mesa version that includes the #23057 fix) and retry constrained
 batches, then compare with CPU decode.
+
+## Comparison: Xeon Gold 6136
+
+Same model (`TinyLlama-1.1B-Chat Q4_K_M`), CPU backend, `llama-bench
+-p 64 -n 16`, using a local dual-socket Xeon Gold 6136 (Skylake-SP,
+12 cores/24 threads per socket, 3.0/3.7 GHz, 6-channel DDR4-2666,
+AVX-512) with single-socket CPU pinning:
+
+| CPU | Threads | pp64 (t/s) | tg16 (t/s) |
+|---|---:|---:|---:|
+| MS-R1 (Cortex-A720/A520) | 8 | 109.8 | **48.6** |
+| MS-R1 (all cores) | 12 | 95.7 | 16.4 |
+| Xeon Gold 6136, 1 socket | 8 | 304.0 | 48.2 |
+| Xeon Gold 6136, 1 socket | 12 | **400.5** | **58.4** |
+| Xeon Gold 6136, 2 sockets | 44 | 20.3 | 6.9 |
+
+Key points:
+
+- **Token generation is essentially tied at 8 threads** (48.2 vs 48.6
+  t/s).  For a 1.1B Q4 model, decode is dominated by memory bandwidth
+  and per-token overhead, not raw FLOPs.
+- The Xeon is **~2.8× faster at prompt processing at 8 threads** and
+  **~3.6× faster at its best (12 threads)**.  Prefill is compute-bound,
+  so Skylake-SP's AVX-512 and larger caches win.
+- The MS-R1's 8-thread sweet spot matters: using all 12 cores drops
+  decode to 16.4 t/s because of A520/big.LITTLE scheduling.  llama.cpp
+  should be run with `-t 8` on this box, not `-t 12`.
+- The dual-socket 44-thread result is not representative — cross-NUMA
+  scheduling destroys performance; the single-socket numbers are the
+  relevant ones for "a Xeon 6136".
+- The test kernels/llama.cpp builds differ slightly (target build
+  `221f0f635`, local build `785322d`), so treat differences under a few
+  percent as noise.  Power is not comparable: the Xeon platform is
+  ~150 W TDP for the CPU alone, versus the whole MS-R1 box idling around
+  ~30 W.
+
+So for a small 1.1B model the MS-R1 is surprisingly competitive on
+decode, while the Xeon remains much faster for long-prompt/批处理
+prefill.  For 7B+ models the Xeon's bandwidth advantage should widen,
+but the same qualitative split (Xeon wins prefill, similar/somewhat
+better decode) is expected.
