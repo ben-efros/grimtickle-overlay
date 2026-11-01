@@ -220,3 +220,15 @@ GPL-2.0.
 | `sys-kernel/cix-npu-driver/files/msr1/0100-armchina-npu-msr1-v0-abi.patch` | derived from `FyrbyAdditive/ms-r1-npu-hack` (GPL-2.0), adapted to the CIX `p1_7.0_v6.2.0` driver source |
 | `cix-noe-umd 2.0.2` | CIX NPU SDK 25Q3, downloaded from `https://dl.radxa.com/orion/common/cix_noe_sdk_25_q3_release.tar.gz`; proprietary vendor userspace, manually installed for validation, not redistributed by the overlay |
 | NPU test programs (`npu_query.c`, `npu_graph_test.c`, `npu_infer_test.c`, `npu_smoketest.c`) | local test utilities; not installed by the package |
+
+## cix-sources-7.3.1-r1 — ACPI ramoops support (0192)
+
+| Overlay patch | Origin |
+|---|---|
+| `0192-fs-pstore-ram-support-acpi-device-properties.patch` | `linux-cix-sky1-ncz-7.3-rc7/sky1-ncz-v7.3-rc7-port.patch` (`fs/pstore/ram.c`), ncz-os/meta-cix: switch ramoops from OF-only accessors to the generic device-property API so the ACPI PRP0001 `RAOP` device the MS-R1 firmware describes (`compatible="ramoops"`, record/console/pmsg sizes) probes instead of failing with -EINVAL; the reserved-memory parent handling stays explicitly OF-only, and the local platform data is zero-initialised. |
+
+The MS-R1 DSDT defines `Device (RAOP)` with `_HID "PRP0001"` and a `_DSD`
+carrying `compatible="ramoops"`, `record-size`, `console-size` and
+`pmsg-size`; before this patch the driver rejected it as
+`ramoops: NULL platform data` / `probe ... failed with error -22`, leaving no
+persistent crash log.

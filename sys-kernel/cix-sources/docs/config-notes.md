@@ -28,6 +28,31 @@ Check with:
     grep RT_GROUP_SCHED /path/to/.config
     # want: # CONFIG_RT_GROUP_SCHED is not set
 
+### `CONFIG_PINCTRL_SKY1=y` (and `CONFIG_PINCTRL_SKY1_BASE=y`)
+
+The captured MS-R1 config has both unset. Without the Sky1 pinctrl driver, the
+two ACPI pin controllers (`_SB.MUX0`, HID `CIXHA016`, and `_SB.MUX1`, HID
+`CIXHA017`) never register, so every consumer that asks for its pin state fails
+the controller lookup and logs, per device:
+
+    pctldev with ACPI name '\_SB.MUX0' not found
+
+On a normal boot this appears 16x for MUX0 and 24x for MUX1 (sbsa-uart,
+cdnsp-sky1, cix-ipbloq-hda, sky1-asoc-card, cdns-i2s-mc, cdns-i2c), and those
+devices run without their pin-mux configuration. The DSDT really does define
+the controllers (Device MUX0/MUX1 with _HID CIXHA016/CIXHA017 and a full
+pin-function table); they are just not driven. The pinctrl-sky1 driver matches
+both HIDs.
+
+ncz-os enables both in their 7.3.1 config. Use together with patch 0189
+(pinctrl-acpi consumer deferral) so consumers that probe before the controller
+registers wait for it instead of silently continuing.
+
+Check with:
+
+    grep PINCTRL_SKY1 /path/to/.config
+    # want: CONFIG_PINCTRL_SKY1=y and CONFIG_PINCTRL_SKY1_BASE=y
+
 ## Consider
 
 These are lower priority; the captured MS-R1 config values are shown.
