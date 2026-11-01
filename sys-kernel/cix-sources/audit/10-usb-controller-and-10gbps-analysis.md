@@ -344,3 +344,39 @@ procedure is:
    (or the tested port), then attach a non-production 10 G device to an
    unused port first; do not use the Ceph enclosure outside maintenance.
 5. Revert with one more one-time `BootNext` to the 7.1.5 entry.
+
+### 5.8 Installation pitfall found during the first deploy attempt
+
+The first attempt to stage the test kernel on the MS-R1 extracted
+`modules-7.3.1-cix-ssp.tar.gz` with `tar -C / -xzf ...`.  The tarball
+contains directory entries rooted at `lib/modules/...`.  On a
+merged-usr system (`/lib -> usr/lib`), GNU tar's default behaviour is
+to replace an existing directory symlink with a real directory unless
+`--keep-directory-symlink` is given.  That removed the
+`/lib/ld-linux-aarch64.so.1` dynamic-loader path, which immediately
+broke `depmod`, then sshd, and finally made the reboot fail at
+`switch_root` with `/sbin/init: No such file or directory` and no
+fallback shell.
+
+The kernel and initramfs were not at fault and no init/systemd files
+were modified.  Recovery (from a dracut emergency shell or rescue
+media) is:
+
+```sh
+mount /dev/mapper/vg0-root /sysroot
+mv /sysroot/lib/modules/7.3.1-cix-ssp /sysroot/usr/lib/modules/
+rm -rf /sysroot/lib
+ln -s usr/lib /sysroot/lib
+```
+
+A safe module install is:
+
+```sh
+tar -C / --keep-directory-symlink -xzf modules-7.3.1-cix-ssp.tar.gz
+# or
+mkdir -p /usr/lib/modules
+tar -C /usr/lib/modules --strip-components=2 -xzf modules-7.3.1-cix-ssp.tar.gz \
+    lib/modules/7.3.1-cix-ssp
+ls -ld /lib      # verify it is still a symlink before rebooting
+depmod 7.3.1-cix-ssp
+```
