@@ -147,3 +147,33 @@ decode, while the Xeon remains much faster for long-prompt/批处理
 prefill.  For 7B+ models the Xeon's bandwidth advantage should widen,
 but the same qualitative split (Xeon wins prefill, similar/somewhat
 better decode) is expected.
+
+## NUMA deployment on dual Xeon 6136
+
+The 44-thread cross-socket result (20.3 pp / 6.9 tg t/s) is a NUMA
+scheduling artifact, not what the box can do.  Running **two independent
+llama.cpp processes, one pinned per socket**, recovers full per-socket
+performance and roughly doubles aggregate throughput:
+
+```sh
+numactl --cpunodebind=0 --membind=0 llama-bench ... -t 12 ... &
+numactl --cpunodebind=1 --membind=1 llama-bench ... -t 12 ... &
+```
+
+Two concurrent TinyLlama-1.1B Q4 benchmarks (64 prompt / 16 gen tokens,
+12 threads each):
+
+| Instance | pp64 (t/s) | tg16 (t/s) |
+|---|---:|---:|
+| Socket 0 | 440.5 | 53.4 |
+| Socket 1 | 437.2 | 52.8 |
+| **Aggregate** | **~878** | **~106** |
+
+That is near-linear scaling versus the single-instance 12-thread result
+(400 pp / 58 tg), and completely unlike the cross-socket 44-thread
+result.  For serving, this argues for two NUMA-pinned `llama-server`
+instances (or two different models, one per socket) behind a simple
+front-end proxy, rather than one process spanning both sockets.  Keep
+each instance at 12 physical threads; 24-thread SMT did not help decode.
+Ensure model pages are actually local (`--membind`; use separate model
+copies or fresh page cache if strict isolation is required).
