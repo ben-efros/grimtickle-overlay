@@ -1,21 +1,17 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: grimtickle-overlay <overlay@localhost>
 Date: Sat Oct 31 14:20:00 2026 -0700
-Subject: [PATCH] usb: cdns3: sky1: make SuperSpeedPlus an opt-in boot parameter
+Subject: [PATCH] usb: cdns3: sky1: enable SuperSpeedPlus by default
 
-SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) has been force-disabled in
+SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) had been force-disabled in
 cdnsp_sky1_probe() since the 7.1 series because sustained 10Gbps I/O on
 the MS-R1 CDNSP/cix-usbdp-phy stack produced periodic device resets.
-That workaround is still the safe default.
 
-Add a core boot parameter, "cix_usb_ssp_enable", defaulting to 0.  When
-set, the forced disable is skipped and the firmware/XEC configuration
-keeps bit 31 of XEC_CFG_3XPORT_MODE set, allowing the host controllers
-to train at SuperSpeedPlus.  The ACPI "ssp-disable" property remains
-authoritative: firmware that sets it still forces 5Gbps.
-
-This provides a low-risk test switch for validating 10Gbps operation
-without changing the default behaviour of any existing system.
+Enable it by default now.  The forced disable is skipped and the
+firmware/XEC configuration keeps bit 31 of XEC_CFG_3XPORT_MODE set, so
+the host controllers train at SuperSpeedPlus.  The ACPI "ssp-disable"
+property remains authoritative, and cix_usb_ssp_enable=0 restores the
+old Gen1/5Gbps cap as an escape hatch.
 
 Signed-off-by: grimtickle-overlay <overlay@localhost>
 ---
@@ -30,15 +26,15 @@ Signed-off-by: grimtickle-overlay <overlay@localhost>
  #include <linux/soc/cix/cix-acpi-resource-lookup.h>
 +
 +/*
-+ * SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) is opt-in.
++ * SuperSpeedPlus (USB 3.2 Gen2x1, 10Gbps) is enabled by default.
 + *
-+ * The vendor default (and this overlay's safe default) caps every CIX
++ * The vendor default (and this overlay's previous default) capped every CIX
 + * CDNSP-Sky1 SSP host port at Gen1/5Gbps because sustained 10Gbps I/O on
 + * the MS-R1's CDNSP/cix-usbdp-phy stack has historically produced periodic
-+ * device resets.  Pass "cix_usb_ssp_enable=1" on the kernel command line
-+ * to allow SSP for controlled testing; the default stays 5Gbps.
++ * device resets.  That cap is no longer the default; pass
++ * "cix_usb_ssp_enable=0" to restore it if a device misbehaves at Gen2.
 + */
-+static bool cix_usb_ssp_enable;
++static bool cix_usb_ssp_enable = true;
 +core_param(cix_usb_ssp_enable, cix_usb_ssp_enable, bool, 0444);
  
  #include "core.h"
@@ -56,17 +52,17 @@ Signed-off-by: grimtickle-overlay <overlay@localhost>
 -	 * pragmatic stability workaround, not a confirmed root-cause fix -
 -	 * see the accompanying note files for suspected causes still under
 -	 * investigation.
-+	 * Keep the vendor's stable Gen1/5Gbps cap unless explicitly opted
-+	 * out of on the command line.  "ssp-disable" from firmware still
-+	 * forces the cap off (i.e. SSP disabled) even when the parameter is
-+	 * set.
++	 * SuperSpeedPlus is enabled by default now.  Firmware
++	 * "ssp-disable" and an explicit cix_usb_ssp_enable=0 still
++	 * force the Gen1/5Gbps cap, so the escape hatch stays
++	 * available if a device turns out to be unstable at Gen2.
  	 */
 -	data->ssp_disable = true;
 +	if (!cix_usb_ssp_enable)
 +		data->ssp_disable = true;
 +	else
 +		dev_warn(dev,
-+			 "cix_usb_ssp_enable=1: SuperSpeedPlus enabled experimentally; 10Gbps stability is not validated\n");
++			 "cix_usb_ssp_enable=0: SuperSpeedPlus disabled, capping host to 5Gbps\n");
  
  	if (!device_property_read_u32(dev, "sof_clk_freq", &ret))
  		data->sof_clk_freq = ret;
