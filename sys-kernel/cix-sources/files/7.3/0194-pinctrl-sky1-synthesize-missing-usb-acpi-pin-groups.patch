@@ -1,0 +1,172 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: grimtickle-overlay <overlay@localhost>
+Subject: [PATCH] pinctrl: sky1: synthesize the USB pin groups the ACPI SSDT omits
+
+The MS-R1 DSDT references pinctrl_usb0..9 from its ten USB controller
+(SUB0-5, HUB0-3) PinGroupFunction resources, but the SSDT never publishes
+the matching PinGroup() objects (it publishes 47 groups, none of them USB).
+pinctrl_acpi_get_pin_groups() therefore cannot create them, so on every
+boot all ten lookups fail:
+
+  sky1-pinctrl CIXHA017:00: does not have pin group pinctrl_usb0
+
+and the pads stay MUX/GPIO UNCLAIMED, i.e. the firmware's intended
+overcurrent pin configuration is never applied by the OS.
+
+The same pads and settings are described by the Sky1 device-tree binding
+(arch/arm64/boot/dts/cix/sky1-pinfunc.h and the vendor DT pin groups):
+pads 47..56 are USB_OC0..9_L (GPIO inputs, pull-up) and pads 57..59 are
+USB_DRIVE_VBUS0/4/5 (function 1, pull-down). Synthesize exactly those ten
+groups when the ACPI description does not provide them, so the pins become
+claimed and muxed as the firmware intends.
+
+Deliberately narrow: only these ten names are synthesized. Any other group
+the firmware fails to publish still produces the normal warning, so a new
+firmware omission is not silently swallowed, and a fixed firmware that does
+publish the groups takes precedence (the fallback only adds missing ones).
+
+configs is encoded as (function << 7) | pinconf with the DT binding's
+PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
+--- a/drivers/pinctrl/cix/pinctrl-sky1-base.c
++++ b/drivers/pinctrl/cix/pinctrl-sky1-base.c
+@@ -672,6 +672,131 @@
+ 	return ret;
+ }
+ 
++
++/*
++ * The MS-R1 ACPI firmware references pinctrl_usb0..9 from its USB controllers'
++ * PinGroupFunction resources, but the SSDT never publishes the matching
++ * PinGroup() objects. pinctrl_acpi_get_pin_groups() therefore cannot create
++ * them and every USB controller probe logs "does not have pin group
++ * pinctrl_usbN", leaving those pads unclaimed.
++ *
++ * The same pads and settings are described by the Sky1 device-tree binding
++ * (arch/arm64/boot/dts/cix/sky1-pinfunc.h + the vendor DT pin groups):
++ *   - pads 47..56 are USB_OC0..9_L, driven as GPIO inputs with pull-up;
++ *   - pads 57..59 are USB_DRIVE_VBUS0/4/5 (function 1), with pull-down.
++ * Synthesize only those ten groups so the firmware's intent is applied. Any
++ * other group the firmware fails to publish still warns as before, so a new
++ * firmware omission is not silently swallowed.
++ *
++ * configs is encoded as (function << 7) | pinconf, with the DT binding's
++ * PULL_UP = 0x40, PULL_DOWN = 0x20 and DS_LEVEL4 = 0x4.
++ */
++struct sky1_acpi_fallback_pin {
++	unsigned short pin;
++	unsigned short configs;
++};
++
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_53[] = { { 53, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_54[] = { { 54, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_55[] = { { 55, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_56[] = { { 56, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_47[] = { { 47, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_48[] = { { 48, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_49[] = { { 49, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb_oc_50[] = { { 50, 0x044 } };
++static const struct sky1_acpi_fallback_pin sky1_fb_usb4[] = {
++	{ 51, 0x044 },	/* GPIO034 / USB_OC4_L, GPIO in, pull-up */
++	{ 58, 0x0a4 },	/* GPIO041 / USB_DRIVE_VBUS4, func 1, pull-down */
++};
++static const struct sky1_acpi_fallback_pin sky1_fb_usb5[] = {
++	{ 52, 0x044 },	/* GPIO035 / USB_OC5_L, GPIO in, pull-up */
++	{ 59, 0x0a4 },	/* GPIO042 / USB_DRIVE_VBUS5, func 1, pull-down */
++};
++
++static const struct {
++	const char *name;
++	const struct sky1_acpi_fallback_pin *pins;
++	unsigned int num_pins;
++} sky1_acpi_fallback_groups[] = {
++	{ "pinctrl_usb0", sky1_fb_usb_oc_53, ARRAY_SIZE(sky1_fb_usb_oc_53) },
++	{ "pinctrl_usb1", sky1_fb_usb_oc_54, ARRAY_SIZE(sky1_fb_usb_oc_54) },
++	{ "pinctrl_usb2", sky1_fb_usb_oc_55, ARRAY_SIZE(sky1_fb_usb_oc_55) },
++	{ "pinctrl_usb3", sky1_fb_usb_oc_56, ARRAY_SIZE(sky1_fb_usb_oc_56) },
++	{ "pinctrl_usb4", sky1_fb_usb4, ARRAY_SIZE(sky1_fb_usb4) },
++	{ "pinctrl_usb5", sky1_fb_usb5, ARRAY_SIZE(sky1_fb_usb5) },
++	{ "pinctrl_usb6", sky1_fb_usb_oc_47, ARRAY_SIZE(sky1_fb_usb_oc_47) },
++	{ "pinctrl_usb7", sky1_fb_usb_oc_48, ARRAY_SIZE(sky1_fb_usb_oc_48) },
++	{ "pinctrl_usb8", sky1_fb_usb_oc_49, ARRAY_SIZE(sky1_fb_usb_oc_49) },
++	{ "pinctrl_usb9", sky1_fb_usb_oc_50, ARRAY_SIZE(sky1_fb_usb_oc_50) },
++};
++
++/*
++ * Append the synthesized groups that the firmware did not publish. Groups the
++ * firmware *does* define are left untouched (so a fixed firmware takes over).
++ * The descriptors are freed by sky1_free_acpi_group_desc() after parsing.
++ */
++static void
++sky1_acpi_add_fallback_groups(struct sky1_pinctrl *spctl,
++			      struct list_head *groups)
++{
++	struct pinctrl_acpi_group_desc *existing, *desc;
++	__be16 *vendor;
++	unsigned short *pins;
++	unsigned int i, j;
++	bool present;
++
++	for (i = 0; i < ARRAY_SIZE(sky1_acpi_fallback_groups); i++) {
++		const char *name = sky1_acpi_fallback_groups[i].name;
++
++		present = false;
++		list_for_each_entry(existing, groups, list)
++			if (existing->name && !strcmp(existing->name, name)) {
++				present = true;
++				break;
++			}
++		if (present)
++			continue;
++
++		desc = kzalloc(sizeof(*desc), GFP_KERNEL);
++		if (!desc)
++			return;
++		pins = kcalloc(sky1_acpi_fallback_groups[i].num_pins,
++			       sizeof(*pins), GFP_KERNEL);
++		vendor = kcalloc(sky1_acpi_fallback_groups[i].num_pins * 2,
++				 sizeof(*vendor), GFP_KERNEL);
++		if (!pins || !vendor) {
++			kfree(pins);
++			kfree(vendor);
++			kfree(desc);
++			return;
++		}
++
++		for (j = 0; j < sky1_acpi_fallback_groups[i].num_pins; j++) {
++			pins[j] = sky1_acpi_fallback_groups[i].pins[j].pin;
++			vendor[j * 2] = cpu_to_be16(pins[j] * 4);
++			vendor[j * 2 + 1] =
++				cpu_to_be16(sky1_acpi_fallback_groups[i].pins[j].configs);
++		}
++
++		desc->name = kstrdup(name, GFP_KERNEL);
++		if (!desc->name) {
++			kfree(pins);
++			kfree(vendor);
++			kfree(desc);
++			return;
++		}
++		desc->pins = pins;
++		desc->num_pins = sky1_acpi_fallback_groups[i].num_pins;
++		desc->vendor_data = (unsigned char *)vendor;
++		desc->vendor_length = sky1_acpi_fallback_groups[i].num_pins * 4;
++		list_add_tail(&desc->list, groups);
++
++		dev_info(spctl->dev,
++			 "synthesized ACPI pin group %s (%u pin(s) the firmware did not publish)\n",
++			 name, desc->num_pins);
++	}
++}
++
+ static int sky1_pinctrl_probe_acpi(struct platform_device *pdev,
+ 				  struct sky1_pinctrl *spctl)
+ {
+@@ -686,6 +811,8 @@
+ 	INIT_LIST_HEAD(&pinctrl_group_list);
+ 	ret = pinctrl_acpi_get_pin_groups(acpi_dev, &pinctrl_group_list);
+ 
++	sky1_acpi_add_fallback_groups(spctl, &pinctrl_group_list);
++
+ 	list_for_each_entry(acpi_grp, &pinctrl_group_list, list)
+ 		num_groups++;
+ 
