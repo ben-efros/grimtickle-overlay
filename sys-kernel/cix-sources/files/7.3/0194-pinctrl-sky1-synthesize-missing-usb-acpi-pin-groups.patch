@@ -13,23 +13,32 @@ boot all ten lookups fail:
 and the pads stay MUX/GPIO UNCLAIMED, i.e. the firmware's intended
 overcurrent pin configuration is never applied by the OS.
 
-The same pads and settings are described by the Sky1 device-tree binding
+The pads and settings are described by the Sky1 device-tree binding
 (arch/arm64/boot/dts/cix/sky1-pinfunc.h and the vendor DT pin groups):
-pads 47..56 are USB_OC0..9_L (GPIO inputs, pull-up) and pads 57..59 are
-USB_DRIVE_VBUS0/4/5 (function 1, pull-down). Synthesize exactly those ten
-groups when the ACPI description does not provide them, so the pins become
-claimed and muxed as the firmware intends.
+pads 47..56 are USB_OC0..9_L driven as GPIO inputs with pull-up, and
+pads 57..59 are USB_DRIVE_VBUS0/4/5 (function 1) with pull-down.
+Synthesize exactly those ten groups when the ACPI description does not
+provide them, so the pins become claimed and muxed as the firmware
+intends.
 
-Deliberately narrow: only these ten names are synthesized. Any other group
-the firmware fails to publish still produces the normal warning, so a new
-firmware omission is not silently swallowed, and a fixed firmware that does
-publish the groups takes precedence (the fallback only adds missing ones).
+Two guards, both important:
+
+ - Only these ten names are synthesized. Any other group the firmware
+   fails to publish still produces the normal warning, so a new firmware
+   omission is not silently swallowed, and a fixed firmware that does
+   publish them takes precedence (the fallback only adds missing groups).
+
+ - A fallback pin is skipped when an ACPI-defined group already uses it.
+   On the MS-R1 pads 58 and 59 are wired to non-USB functions
+   (gbe2_poweren_gpio and wifi_vbat_gpio respectively); claiming them for
+   pinctrl_usb4/usb5 made those firmware groups fail with -EINVAL. The
+   OC pads are kept, so USB overcurrent detection still works.
 
 configs is encoded as (function << 7) | pinconf with the DT binding's
 PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
 --- a/drivers/pinctrl/cix/pinctrl-sky1-base.c
 +++ b/drivers/pinctrl/cix/pinctrl-sky1-base.c
-@@ -672,6 +672,131 @@
+@@ -672,6 +672,165 @@
  	return ret;
  }
  
@@ -91,6 +100,21 @@ PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
 +	{ "pinctrl_usb9", sky1_fb_usb_oc_50, ARRAY_SIZE(sky1_fb_usb_oc_50) },
 +};
 +
++
++/* True when @pad is already covered by a group the firmware did define. */
++static bool sky1_acpi_pad_in_use(struct list_head *groups, unsigned short pad)
++{
++	struct pinctrl_acpi_group_desc *group;
++	unsigned int i;
++
++	list_for_each_entry(group, groups, list)
++		for (i = 0; i < group->num_pins; i++)
++			if (group->pins[i] == pad)
++				return true;
++
++	return false;
++}
++
 +/*
 + * Append the synthesized groups that the firmware did not publish. Groups the
 + * firmware *does* define are left untouched (so a fixed firmware takes over).
@@ -103,7 +127,7 @@ PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
 +	struct pinctrl_acpi_group_desc *existing, *desc;
 +	__be16 *vendor;
 +	unsigned short *pins;
-+	unsigned int i, j;
++	unsigned int i, j, num_pins;
 +	bool present;
 +
 +	for (i = 0; i < ARRAY_SIZE(sky1_acpi_fallback_groups); i++) {
@@ -132,11 +156,30 @@ PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
 +			return;
 +		}
 +
++		/*
++		 * Never claim a pad another group already uses. The MS-R1 wires
++		 * two of the DT VBUS pads to non-USB functions (pad 58 to
++		 * gbe2_poweren_gpio, pad 59 to wifi_vbat_gpio); claiming them here
++		 * made those ACPI groups fail with -EINVAL, so keep only the pads
++		 * nothing else has taken.
++		 */
++		num_pins = 0;
 +		for (j = 0; j < sky1_acpi_fallback_groups[i].num_pins; j++) {
-+			pins[j] = sky1_acpi_fallback_groups[i].pins[j].pin;
-+			vendor[j * 2] = cpu_to_be16(pins[j] * 4);
-+			vendor[j * 2 + 1] =
++			unsigned short pad = sky1_acpi_fallback_groups[i].pins[j].pin;
++
++			if (sky1_acpi_pad_in_use(groups, pad))
++				continue;
++			pins[num_pins] = pad;
++			vendor[num_pins * 2] = cpu_to_be16(pad * 4);
++			vendor[num_pins * 2 + 1] =
 +				cpu_to_be16(sky1_acpi_fallback_groups[i].pins[j].configs);
++			num_pins++;
++		}
++		if (!num_pins) {
++			kfree(pins);
++			kfree(vendor);
++			kfree(desc);
++			continue;
 +		}
 +
 +		desc->name = kstrdup(name, GFP_KERNEL);
@@ -147,9 +190,9 @@ PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
 +			return;
 +		}
 +		desc->pins = pins;
-+		desc->num_pins = sky1_acpi_fallback_groups[i].num_pins;
++		desc->num_pins = num_pins;
 +		desc->vendor_data = (unsigned char *)vendor;
-+		desc->vendor_length = sky1_acpi_fallback_groups[i].num_pins * 4;
++		desc->vendor_length = num_pins * 4;
 +		list_add_tail(&desc->list, groups);
 +
 +		dev_info(spctl->dev,
@@ -161,7 +204,7 @@ PULL_UP = 0x40, PULL_DOWN = 0x20, DS_LEVEL4 = 0x4.
  static int sky1_pinctrl_probe_acpi(struct platform_device *pdev,
  				  struct sky1_pinctrl *spctl)
  {
-@@ -686,6 +811,8 @@
+@@ -686,6 +845,8 @@
  	INIT_LIST_HEAD(&pinctrl_group_list);
  	ret = pinctrl_acpi_get_pin_groups(acpi_dev, &pinctrl_group_list);
  
