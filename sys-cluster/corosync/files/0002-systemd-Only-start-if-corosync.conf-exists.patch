@@ -12,14 +12,14 @@ not exist until 'pvecm create' or 'pvecm add' is run. This condition
 prevents the spurious failure.
 
 Originally from Fabian Grünbichler <f.gruenbichler@proxmox.com>.
-Adapted for corosync 3.1.10 (service files moved to init/systemd/).
+Adapted for corosync 3.1.10 (service files live in init/).
 
 ---
- init/systemd/corosync.service.in | 1 +
+ init/corosync.service.in | 1 +
  1 file changed, 1 insertion(+)
 
---- a/init/systemd/corosync.service.in
-+++ b/init/systemd/corosync.service.in
+--- a/init/corosync.service.in
++++ b/init/corosync.service.in
 @@ -2,6 +2,7 @@
  Description=Corosync Cluster Engine
  Documentation=man:corosync man:corosync.conf man:corosync_overview

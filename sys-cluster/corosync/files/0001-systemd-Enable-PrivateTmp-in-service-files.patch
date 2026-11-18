@@ -6,15 +6,15 @@ Improves systemd security sandboxing by preventing corosync from
 accessing temporary files created by other services.
 
 Originally from Ferenc Wágner <wferi@debian.org> (Debian packaging).
-Adapted for corosync 3.1.10 (service files moved to init/systemd/).
+Adapted for corosync 3.1.10 (service files live in init/).
 
 ---
- init/systemd/corosync-notifyd.service.in | 1 +
- init/systemd/corosync.service.in         | 1 +
+ init/corosync-notifyd.service.in | 1 +
+ init/corosync.service.in         | 1 +
  2 files changed, 2 insertions(+)
 
---- a/init/systemd/corosync-notifyd.service.in
-+++ b/init/systemd/corosync-notifyd.service.in
+--- a/init/corosync-notifyd.service.in
++++ b/init/corosync-notifyd.service.in
 @@ -9,6 +9,7 @@
  ExecStart=@SBINDIR@/corosync-notifyd -f $OPTIONS
  Type=notify
@@ -23,8 +23,8 @@ Adapted for corosync 3.1.10 (service files moved to init/systemd/).
  
  [Install]
  WantedBy=multi-user.target
---- a/init/systemd/corosync.service.in
-+++ b/init/systemd/corosync.service.in
+--- a/init/corosync.service.in
++++ b/init/corosync.service.in
 @@ -31,6 +31,7 @@
  #RestartSec=70
  #  rewrite according to environment.
